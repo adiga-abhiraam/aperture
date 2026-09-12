@@ -123,6 +123,9 @@ class VerificationResult(BaseModel):
 class SearchRequest(BaseModel):
     query: str
     top_k: int = Field(default=10, ge=0, le=10000)
+    # Restrict retrieval to one indexed video (the watch page's scoped chat).
+    # Applied as a Qdrant payload filter so recall is not spent on other videos.
+    video_id: str | None = Field(default=None, max_length=128)
     # None respects the server default.  The UI can explicitly enable the
     # already-implemented decomposition flow for a demo without mutating
     # process-wide environment flags.

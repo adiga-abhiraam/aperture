@@ -64,7 +64,18 @@ def create_collection(client: QdrantClient | None = None) -> None:
     logger.info("Created collection %s", config.COLLECTION_NAME)
 
 
-def _search(vector_name: str, vector: list[float], top_k: int) -> list[dict]:
+def video_filter(video_id: str | None):
+    """Payload filter limiting hits to one video, or None for the whole library."""
+    if not video_id:
+        return None
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    return Filter(must=[FieldCondition(key="video_id", match=MatchValue(value=video_id))])
+
+
+def _search(
+    vector_name: str, vector: list[float], top_k: int, video_id: str | None = None
+) -> list[dict]:
     """Shared search implementation for a single named vector."""
     client = connect_qdrant()
     try:
@@ -72,6 +83,7 @@ def _search(vector_name: str, vector: list[float], top_k: int) -> list[dict]:
             collection_name=config.COLLECTION_NAME,
             using=vector_name,
             query=vector,
+            query_filter=video_filter(video_id),
             limit=top_k,
             with_payload=True,
         ).points
@@ -159,24 +171,32 @@ def validate_collection_schema(client: QdrantClient | None = None) -> list[str]:
     return issues
 
 
-def search_visual(vector: list[float], top_k: int = config.DEFAULT_TOP_K) -> list[dict]:
-    return _search("visual", vector, top_k)
+def search_visual(
+    vector: list[float], top_k: int = config.DEFAULT_TOP_K, video_id: str | None = None
+) -> list[dict]:
+    return _search("visual", vector, top_k, video_id)
 
 
-def search_audio(vector: list[float], top_k: int = config.DEFAULT_TOP_K) -> list[dict]:
-    return _search("audio", vector, top_k)
+def search_audio(
+    vector: list[float], top_k: int = config.DEFAULT_TOP_K, video_id: str | None = None
+) -> list[dict]:
+    return _search("audio", vector, top_k, video_id)
 
 
-def search_speech(vector: list[float], top_k: int = config.DEFAULT_TOP_K) -> list[dict]:
-    return _search("speech", vector, top_k)
+def search_speech(
+    vector: list[float], top_k: int = config.DEFAULT_TOP_K, video_id: str | None = None
+) -> list[dict]:
+    return _search("speech", vector, top_k, video_id)
 
 
-def search_caption(vector: list[float], top_k: int = config.DEFAULT_TOP_K) -> list[dict]:
+def search_caption(
+    vector: list[float], top_k: int = config.DEFAULT_TOP_K, video_id: str | None = None
+) -> list[dict]:
     # Fetch additional candidates before filtering so unavailable captions do
     # not make an otherwise populated collection appear empty.  Pre-merge
     # development points did not carry caption_available, which is treated as
     # available for backwards compatibility.
-    candidates = _search("caption", vector, top_k * 3)
+    candidates = _search("caption", vector, top_k * 3, video_id)
     return [
         hit
         for hit in candidates
