@@ -55,6 +55,11 @@ Frontend only: `cd aperture-frontend && npm run dev` (Turbopack; first page ~10 
 
 Chat needs a processed video and a running Qdrant (`docker compose up -d qdrant`).
 
+**Where processing runs** is chosen in the app (avatar menu → Processing, or "Change" in the upload dialog):
+
+- **This computer (default)** — `self-hosted-v1`: Whisper, X-CLIP, CLAP and BGE-M3 on the local CPU, local Qdrant. No keys, nothing leaves the machine.
+- **Cloud API (Gemini)** — `api-gemini-free-v1`: video is sent to Gemini for transcription, embeddings and captions; still uses the local Qdrant. Needs a Gemini API key, kept in the browser tab only (a backend runtime session is created from it).
+
 ## Tech Stack
 
 - **Backend**: Python, FastAPI, Qdrant (vector DB)

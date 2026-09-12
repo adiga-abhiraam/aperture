@@ -53,6 +53,8 @@ export interface Video {
   id: string;
   /** Identifier used inside the search index (content hash); differs from `id`. */
   indexVideoId?: string;
+  /** Runtime profile the job used: "self-hosted-v1" (CPU) or "api-gemini-free-v1". */
+  profileId?: string;
   title: string;
   description: string;
   thumbnailUrl: string;

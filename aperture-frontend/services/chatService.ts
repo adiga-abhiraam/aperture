@@ -14,9 +14,14 @@ import { SearchResponse, SearchResultItem } from "./api/types";
 import { mockChatService } from "./mockChatService";
 import { USING_MOCK_API } from "./videoService";
 
+export interface AskOptions {
+  /** Required for videos processed with the API profile. */
+  runtimeSessionId?: string;
+}
+
 export interface ChatService {
   history(video: Video): ChatMessage[];
-  ask(video: Video, query: string): Promise<ChatMessage>;
+  ask(video: Video, query: string, options?: AskOptions): Promise<ChatMessage>;
 }
 
 const TOP_K = 5;
@@ -59,7 +64,7 @@ class ApiChatService implements ChatService {
     return this.histories.get(video.id) ?? [];
   }
 
-  async ask(video: Video, query: string): Promise<ChatMessage> {
+  async ask(video: Video, query: string, options: AskOptions = {}): Promise<ChatMessage> {
     this.push(video, {
       id: `user-${Date.now()}`,
       videoId: video.id,
@@ -74,7 +79,14 @@ class ApiChatService implements ChatService {
       response = await api<SearchResponse>("/api/query/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, top_k: TOP_K, video_id: indexVideoId }),
+        body: JSON.stringify({
+          query,
+          top_k: TOP_K,
+          video_id: indexVideoId,
+          ...(video.profileId === "api-gemini-free-v1"
+            ? { profile_id: video.profileId, runtime_session_id: options.runtimeSessionId }
+            : {}),
+        }),
       });
     } catch (err) {
       const reason =

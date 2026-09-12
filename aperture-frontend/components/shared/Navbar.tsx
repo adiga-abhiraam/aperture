@@ -2,7 +2,8 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Search, X, Menu, LogOut, Upload, Sun, Moon, Monitor, Check } from "lucide-react";
+import { Search, X, Menu, LogOut, Upload, Sun, Moon, Monitor, Check, Cpu, Cloud } from "lucide-react";
+import { ProcessingSettingsDialog, useProcessingSettings } from "@/features/settings";
 import { Logo } from "./Logo";
 import { Button } from "../ui/Button";
 import { useAuth } from "@/features/auth";
@@ -28,6 +29,8 @@ export function Navbar({ onToggleSidebar, onUploadClick, searchQuery = "", onSea
   const { preference, setPreference } = useTheme();
   const [query, setQuery] = useState(searchQuery);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const { mode } = useProcessingSettings();
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => setQuery(searchQuery), [searchQuery]);
@@ -150,6 +153,22 @@ export function Navbar({ onToggleSidebar, onUploadClick, searchQuery = "", onSea
                 ))}
               </div>
 
+              <div className="mx-2 mt-1 rounded-2xl bg-surface p-1">
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setSettingsOpen(true);
+                  }}
+                  className="flex h-10 w-full items-center gap-3 rounded-xl px-3 text-sm text-on-surface state-layer"
+                >
+                  {mode === "api" ? <Cloud className="h-5 w-5 text-on-variant" /> : <Cpu className="h-5 w-5 text-on-variant" />}
+                  <span className="flex-1 text-left">Processing</span>
+                  <span className="text-xs text-on-muted">{mode === "api" ? "Cloud API" : "This computer"}</span>
+                </button>
+              </div>
+
               <div className="m-2 mt-1 rounded-2xl bg-surface p-1">
                 <button
                   type="button"
@@ -168,6 +187,7 @@ export function Navbar({ onToggleSidebar, onUploadClick, searchQuery = "", onSea
           )}
         </div>
       </div>
+      <ProcessingSettingsDialog isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </header>
   );
 }

@@ -7,6 +7,7 @@ import { AppShell } from "@/components/shared";
 import { Button } from "@/components/ui/Button";
 import { VideoGrid, DashboardHeader, UploadModal, EmptyState, DeleteVideoDialog, useVideoFilter, useVideoLibrary } from "@/features/dashboard";
 import { useUpload } from "@/features/upload";
+import { ProcessingSettingsDialog, useProcessingSettings } from "@/features/settings";
 import { API_ORIGIN } from "@/services/videoService";
 import { ApiError } from "@/services/api/client";
 import { ProcessingStatus, Video } from "@/types/video";
@@ -26,6 +27,8 @@ function DashboardContent() {
   const filter = useVideoFilter(library.videos);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [toDelete, setToDelete] = useState<Video | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const processing = useProcessingSettings();
 
   // Deep links: /dashboard?status=failed&q=car
   useEffect(() => {
@@ -118,11 +121,13 @@ function DashboardContent() {
       <UploadModal
         pending={pending}
         onClose={clear}
+        onChangeProcessing={() => setSettingsOpen(true)}
         onConfirmUpload={async ({ title, startProcessing }) => {
           if (!pending) return;
           try {
+            const runtimeSessionId = processing.mode === "api" ? await processing.ensureSession() : undefined;
             const blob: Blob = pending.file ?? (await fetch(pending.url).then((r) => r.blob()));
-            await library.upload(blob, pending.name, { title, startProcessing });
+            await library.upload(blob, pending.name, { title, startProcessing, mode: processing.mode, runtimeSessionId });
             setUploadError(null);
             clear();
           } catch (err) {
@@ -130,6 +135,9 @@ function DashboardContent() {
           }
         }}
       />
+
+      {/* Rendered last so it stacks above the upload dialog when opened from "Change". */}
+      <ProcessingSettingsDialog isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </AppShell>
   );
 }

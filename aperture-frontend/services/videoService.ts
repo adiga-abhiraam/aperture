@@ -14,6 +14,9 @@ import { mockVideoService } from "./mockVideoService";
 export interface UploadOptions {
   title: string;
   startProcessing: boolean;
+  /** "local" (default, CPU) or "api" with a runtime session from Processing settings. */
+  mode?: "local" | "api";
+  runtimeSessionId?: string;
 }
 
 export interface VideoService {
@@ -55,10 +58,11 @@ class ApiVideoService implements VideoService {
   async upload(file: Blob, filename: string, options: UploadOptions): Promise<Video> {
     const form = new FormData();
     form.append("video", file, filename);
-    form.append(
-      "configuration",
-      JSON.stringify({ title: options.title, vlm_mode: VLM_MODE, index_qdrant: true, profile_id: "self-hosted-v1" })
-    );
+    const configuration =
+      options.mode === "api"
+        ? { title: options.title, profile_id: "api-gemini-free-v1", runtime_session_id: options.runtimeSessionId, index_qdrant: true }
+        : { title: options.title, vlm_mode: VLM_MODE, index_qdrant: true, profile_id: "self-hosted-v1" };
+    form.append("configuration", JSON.stringify(configuration));
     const job = await api<JobPublic>("/api/processing/jobs", { method: "POST", body: form });
     const video = videoFromJob(job);
     return options.startProcessing ? this.startProcessing(video.id) : video;

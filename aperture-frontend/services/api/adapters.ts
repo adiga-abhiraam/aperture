@@ -115,6 +115,7 @@ export function videoFromJob(job: JobSummary | JobPublic, windows: WindowRow[] =
   return {
     id: job.job_id,
     indexVideoId: m.video_id,
+    profileId: job.profile_id || ("configuration" in job ? job.configuration?.profile_id : undefined) || "self-hosted-v1",
     title: job.title && job.title !== filename ? job.title : titleFromFilename(filename) || job.job_id,
     description:
       status === "preprocessed"

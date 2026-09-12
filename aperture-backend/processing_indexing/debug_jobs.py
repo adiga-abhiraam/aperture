@@ -152,6 +152,7 @@ class Job:
                 "status": self.status,
                 "stage": self.stage,
                 "progress": self.progress,
+                "profile_id": self.config.get("profile_id") or "self-hosted-v1",
                 "created_at": self.created_at,
                 "started_at": self.started_at,
                 "finished_at": self.finished_at,

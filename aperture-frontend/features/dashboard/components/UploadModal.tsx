@@ -1,7 +1,8 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { Film, Loader2 } from "lucide-react";
+import { Film, Loader2, Cpu, Cloud } from "lucide-react";
+import { useProcessingSettings } from "@/features/settings";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -11,10 +12,12 @@ import { formatDuration } from "@/lib/formatters";
 export interface UploadModalProps {
   pending: PendingUpload | null;
   onClose: () => void;
+  onChangeProcessing?: () => void;
   onConfirmUpload: (data: { title: string; startProcessing: boolean }) => Promise<void> | void;
 }
 
-export function UploadModal({ pending, onClose, onConfirmUpload }: UploadModalProps) {
+export function UploadModal({ pending, onClose, onChangeProcessing, onConfirmUpload }: UploadModalProps) {
+  const { mode } = useProcessingSettings();
   const [title, setTitle] = useState("");
   const [startProcessing, setStartProcessing] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -65,6 +68,18 @@ export function UploadModal({ pending, onClose, onConfirmUpload }: UploadModalPr
           </div>
 
           <Input label="Title" name="title" autoFocus value={title} onChange={(e) => setTitle(e.target.value)} required />
+
+          <div className="flex items-center gap-3 rounded-xl bg-surface-container px-4 py-3 text-[13px]">
+            {mode === "api" ? <Cloud className="h-5 w-5 shrink-0 text-on-muted" /> : <Cpu className="h-5 w-5 shrink-0 text-on-muted" />}
+            <span className="min-w-0 flex-1 text-on-surface">
+              Processed {mode === "api" ? "with the Gemini cloud API" : "on this computer (CPU)"}
+            </span>
+            {onChangeProcessing && (
+              <button type="button" onClick={onChangeProcessing} className="shrink-0 font-medium text-primary hover:underline">
+                Change
+              </button>
+            )}
+          </div>
 
           <label className="flex cursor-pointer items-start gap-3 rounded-xl px-1 py-1">
             <input

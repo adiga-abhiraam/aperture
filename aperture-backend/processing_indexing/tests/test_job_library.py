@@ -303,3 +303,26 @@ def test_delete_refuses_a_running_job_and_the_endpoint_says_409(tmp_path, monkey
     monkeypatch.setattr(manager, "_delete_index_points", lambda *_: True)
     assert client.delete("/api/processing/jobs/r").status_code == 200
     assert client.get("/api/processing/jobs/r").status_code == 404
+
+
+def test_api_job_configuration_keeps_the_display_title():
+    from processing_indexing import debug_api
+    from processing_indexing.runtime_profiles import get_profile
+
+    class Session:
+        profile = get_profile("api-gemini-free-v1")
+        configuration = {"window_seconds": 20.0, "stride_seconds": 10.0}
+
+    normalized = debug_api._normalize_api_job_configuration(
+        {"profile_id": "api-gemini-free-v1", "runtime_session_id": "s1", "title": "  Beach cats  ", "index_qdrant": True},
+        Session(),
+    )
+    assert normalized["title"] == "Beach cats"
+    assert normalized["runtime_session_id"] == "s1"
+
+
+def test_summary_reports_the_profile_used(tmp_path):
+    local = _job(tmp_path, "l")
+    api = _job(tmp_path, "a", config={"profile_id": "api-gemini-free-v1"})
+    assert local.summary()["profile_id"] == "self-hosted-v1"
+    assert api.summary()["profile_id"] == "api-gemini-free-v1"

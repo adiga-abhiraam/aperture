@@ -35,6 +35,7 @@ export interface JobSummary {
   status: JobStatus;
   stage: string;
   progress: number; // 0..1
+  profile_id?: string;
   created_at: number; // unix seconds
   started_at: number | null;
   finished_at: number | null;
@@ -46,6 +47,7 @@ export interface JobSummary {
 
 /** GET /api/processing/jobs/{id} adds diagnostics; we only rely on these. */
 export interface JobPublic extends Omit<JobSummary, "total_windows" | "indexed_windows" | "errors"> {
+  configuration?: { profile_id?: string; runtime_session_id?: string; vlm_mode?: string };
   current_window: number;
   total_windows: number;
   summary: { successfully_indexed_windows?: number; status?: string; duration?: number };

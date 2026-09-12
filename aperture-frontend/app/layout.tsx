@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { AuthProvider } from "@/features/auth";
 import { UploadProvider } from "@/features/upload";
+import { ProcessingSettingsProvider } from "@/features/settings";
 import { THEME_INIT_SCRIPT } from "@/lib/theme";
 import "./globals.css";
 
@@ -22,7 +23,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body className="min-h-screen">
         <AuthProvider>
-          <UploadProvider>{children}</UploadProvider>
+          <ProcessingSettingsProvider>
+            <UploadProvider>{children}</UploadProvider>
+          </ProcessingSettingsProvider>
         </AuthProvider>
       </body>
     </html>

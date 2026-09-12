@@ -209,6 +209,8 @@ _API_JOB_CONFIG_FIELDS = frozenset(
         "stride_seconds",
         "max_windows",
         "index_qdrant",
+        # Display name only; never used for execution.
+        "title",
     }
 )
 
@@ -257,6 +259,8 @@ def _normalize_api_job_configuration(config: dict, session) -> dict:
         "profile_id": session.profile.id,
         "runtime_session_id": session_id,
     }
+    if isinstance(config.get("title"), str) and config["title"].strip():
+        normalized["title"] = config["title"].strip()[:200]
     if "window_seconds" in config:
         normalized["window_seconds"] = _positive_api_job_number(
             config["window_seconds"], "window_seconds"
