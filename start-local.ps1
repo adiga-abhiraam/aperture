@@ -103,10 +103,6 @@ function Find-BootstrapPython {
     return $null
 }
 
-if (-not $ApiOnly -and -not (Get-Command docker -ErrorAction SilentlyContinue)) {
-    throw "Docker Desktop is required to run Qdrant. Install/start Docker Desktop, then run this command again."
-}
-
 Set-Location -LiteralPath $Root
 
 if (-not (Test-Path -LiteralPath $Python)) {
@@ -141,12 +137,23 @@ if ($Setup) {
 if ($ApiOnly) {
     Write-Host "API-only mode: skipping local Qdrant and Docker. Configure Qdrant Cloud in the Architecture page."
 }
+elseif (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    Write-Host "Docker is not installed. Aperture will run using embedded local vector storage."
+}
 elseif (-not (Test-LocalUrl "http://127.0.0.1:6333/healthz")) {
     if (Test-LocalPort 6333) {
         Write-Warning "Qdrant is already listening on port 6333, but its health probe is slow. Skipping Docker startup."
     }
     else {
-        & docker compose up -d qdrant
+        try {
+            & docker compose up -d qdrant 2>$null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "Docker is not running. Aperture will run using embedded local vector storage."
+            }
+        }
+        catch {
+            Write-Host "Docker Desktop is not active. Aperture will run using embedded local vector storage."
+        }
     }
 }
 else {
