@@ -72,8 +72,7 @@ export function ProcessingSettingsProvider({ children }: { children: React.React
   const [hasApiKey, setHasApiKey] = useState(false);
 
   useEffect(() => {
-    const saved = read(localStorage, MODE_KEY);
-    if (saved === "api" || saved === "local") setModeState(saved);
+    setModeState("local");
     setHasApiKey(Boolean(read(sessionStorage, KEY_KEY)));
   }, []);
 

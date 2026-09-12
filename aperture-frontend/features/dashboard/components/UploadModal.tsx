@@ -70,15 +70,10 @@ export function UploadModal({ pending, onClose, onChangeProcessing, onConfirmUpl
           <Input label="Title" name="title" autoFocus value={title} onChange={(e) => setTitle(e.target.value)} required />
 
           <div className="flex items-center gap-3 rounded-xl bg-surface-container px-4 py-3 text-[13px]">
-            {mode === "api" ? <Cloud className="h-5 w-5 shrink-0 text-on-muted" /> : <Cpu className="h-5 w-5 shrink-0 text-on-muted" />}
+            <Cpu className="h-5 w-5 shrink-0 text-on-muted" />
             <span className="min-w-0 flex-1 text-on-surface">
-              Processed {mode === "api" ? "with the Gemini cloud API" : "on this computer (CPU)"}
+              Processed on Self-Hosted AI Engine (Whisper + X-CLIP + CLAP + BGE-M3)
             </span>
-            {onChangeProcessing && (
-              <button type="button" onClick={onChangeProcessing} className="shrink-0 font-medium text-primary hover:underline">
-                Change
-              </button>
-            )}
           </div>
 
           <label className="flex cursor-pointer items-start gap-3 rounded-xl px-1 py-1">

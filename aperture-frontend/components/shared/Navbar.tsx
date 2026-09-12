@@ -163,9 +163,9 @@ export function Navbar({ onToggleSidebar, onUploadClick, searchQuery = "", onSea
                   }}
                   className="flex h-10 w-full items-center gap-3 rounded-xl px-3 text-sm text-on-surface state-layer"
                 >
-                  {mode === "api" ? <Cloud className="h-5 w-5 text-on-variant" /> : <Cpu className="h-5 w-5 text-on-variant" />}
+                  <Cpu className="h-5 w-5 text-on-variant" />
                   <span className="flex-1 text-left">Processing</span>
-                  <span className="text-xs text-on-muted">{mode === "api" ? "Cloud API" : "This computer"}</span>
+                  <span className="text-xs text-on-muted">Self-Hosted Engine</span>
                 </button>
               </div>
 
