@@ -168,9 +168,9 @@ if (-not (Test-LocalUrl "http://127.0.0.1:8000/api/runtime/profiles")) {
     $env:TMP = $UploadTemp
     $env:OPENBLAS_NUM_THREADS = '1'
     $env:OMP_NUM_THREADS = '1'
-    $env:PYTHONPATH = ''
+    $env:PYTHONPATH = $Backend
     $env:QUERY_LOW_MEMORY_MODE = '1'
-    Start-Process -FilePath $Python -ArgumentList @("-m", "uvicorn", "processing_indexing.debug_api:app", "--host", "127.0.0.1", "--port", "8000") -WorkingDirectory (Join-Path $Root "aperture-backend") -WindowStyle Hidden
+    Start-Process -FilePath $Python -ArgumentList @("-m", "uvicorn", "processing_indexing.debug_api:app", "--host", "127.0.0.1", "--port", "8000") -WorkingDirectory $Backend -WindowStyle Hidden
     Write-Host "Started the processing API."
 }
 else {
