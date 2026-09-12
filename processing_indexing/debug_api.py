@@ -38,6 +38,8 @@ from .library import (
 )
 from .preflight import model_statuses
 from .probe import VideoProbeError
+from .gemini_runtime import GeminiAuthenticationError, GeminiRuntimeError
+from .openai_runtime import OpenAIRuntimeError
 from .public_demo import (
     PublicDemoError,
     PublicSampleCatalog,
@@ -105,6 +107,27 @@ app.add_middleware(
 @app.exception_handler(PublicDemoError)
 async def public_demo_error(_request: Request, exc: PublicDemoError):
     return JSONResponse(status_code=exc.status_code, content=exc.public())
+
+
+@app.exception_handler(GeminiAuthenticationError)
+async def gemini_auth_error(_request: Request, exc: GeminiAuthenticationError):
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.exception_handler(GeminiRuntimeError)
+async def gemini_runtime_error(_request: Request, exc: GeminiRuntimeError):
+    return JSONResponse(status_code=502, content={"detail": str(exc)})
+
+
+@app.exception_handler(OpenAIRuntimeError)
+async def openai_runtime_error(_request: Request, exc: OpenAIRuntimeError):
+    return JSONResponse(status_code=502, content={"detail": str(exc)})
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(_request: Request, exc: Exception):
+    logger.exception("Unhandled server error: %s", exc)
+    return JSONResponse(status_code=500, content={"detail": f"Internal server error: {exc}"})
 
 
 _DEVELOPER_PREFIXES = (
