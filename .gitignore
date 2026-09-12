@@ -7,12 +7,10 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
-# Secrets and local configuration. Templates stay tracked so a fresh clone
-# still documents which variables are required.
+# Secrets and local configuration
 .env
 .env.*
 !.env.example
-!.env.*.example
 *.key
 
 # Model caches and local runtime data
@@ -27,11 +25,10 @@ __pycache__/
 qdrant_data/
 processing_jobs/
 
-# Media. Video and audio are large and mostly re-derivable, so they stay local.
-# Manifests, READMEs, and licence records that describe them remain tracked.
+# Media
 *.mp4
 *.webm
-!test_assets/media/public_demo/*.webm
+!aperture-backend/test_assets/media/public_demo/*.webm
 *.mov
 *.avi
 *.mkv
@@ -41,26 +38,23 @@ processing_jobs/
 *.m4a
 *.flac
 *.ogg
-test_assets/asset_library/media/
-test_assets/asset_library/**/videos/
-test_assets/asset_library/*.log
-test_assets/debug_processing_video.mp4
-test_assets/debug_processing_speech.wav
+aperture-backend/test_assets/asset_library/media/
+aperture-backend/test_assets/asset_library/**/videos/
+aperture-backend/test_assets/asset_library/*.log
+aperture-backend/test_assets/debug_processing_video.mp4
+aperture-backend/test_assets/debug_processing_speech.wav
 
-# Frontend hero asset: 20 MB, fetched from the CDN when absent.
-video_search_frontend/public/hero.mp4
+# Frontend hero asset
+aperture-frontend/video_search_frontend/public/hero.mp4
 
 # Node build output
-frontend/node_modules/
-frontend/dist/
-frontend/.vite/
-processing_debug_frontend/node_modules/
-processing_debug_frontend/.next/
-processing_debug_frontend/out/
-video_search_frontend/node_modules/
-video_search_frontend/dist/
-video_search_frontend/.vite/
 node_modules/
+aperture-frontend/processing_debug_frontend/node_modules/
+aperture-frontend/processing_debug_frontend/.next/
+aperture-frontend/processing_debug_frontend/out/
+aperture-frontend/video_search_frontend/node_modules/
+aperture-frontend/video_search_frontend/dist/
+aperture-frontend/video_search_frontend/.vite/
 npm-debug.log*
 yarn-debug.log*
 pnpm-debug.log*

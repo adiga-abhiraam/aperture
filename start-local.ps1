@@ -8,8 +8,9 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Root = $PSScriptRoot
+$Backend = Join-Path $Root "aperture-backend"
 $Python = Join-Path $Root ".venv\Scripts\python.exe"
-$Frontend = Join-Path $Root "processing_debug_frontend"
+$Frontend = Join-Path (Join-Path $Root "aperture-frontend") "processing_debug_frontend"
 $ModelCache = Join-Path $Root ".model-cache"
 $UploadTemp = Join-Path $Root ".tmp\uploads"
 
@@ -115,7 +116,7 @@ if (-not (Test-Path -LiteralPath $Python)) {
 }
 
 if ($Setup) {
-    & $Python -m pip install -r requirements-processing.txt -r requirements.txt
+    & $Python -m pip install -r (Join-Path $Backend "requirements-processing.txt") -r (Join-Path $Backend "requirements.txt")
 
     $Npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
     if (-not $Npm) {
@@ -159,7 +160,7 @@ if (-not (Test-LocalUrl "http://127.0.0.1:8000/api/runtime/profiles")) {
     $EscapedModelCache = $ModelCache.Replace("'", "''")
     $EscapedUploadTemp = $UploadTemp.Replace("'", "''")
     $BackendScript = @"
-Set-Location -LiteralPath '$EscapedRoot'
+Set-Location -LiteralPath '$EscapedRoot\aperture-backend'
 New-Item -ItemType Directory -Force -Path '$EscapedUploadTemp' | Out-Null
 `$env:HF_HOME = '$EscapedModelCache'
 `$env:TEMP = '$EscapedUploadTemp'

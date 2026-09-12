@@ -5,9 +5,9 @@
 FROM node:22-slim AS frontend
 
 WORKDIR /frontend
-COPY video_search_frontend/package.json video_search_frontend/package-lock.json ./
+COPY aperture-frontend/video_search_frontend/package.json aperture-frontend/video_search_frontend/package-lock.json ./
 RUN npm ci
-COPY video_search_frontend ./
+COPY aperture-frontend/video_search_frontend ./
 
 ARG PUBLIC_SITE_URL=https://aperturevideo.up.railway.app
 ARG VITE_PUBLIC_UPLOADS_ENABLED=true
@@ -28,12 +28,12 @@ WORKDIR /app
 
 # Only the API dependencies. The heavy local-model requirements
 # (requirements-processing.txt) are not needed for the API-based path.
-COPY requirements-cloudrun.txt ./
+COPY aperture-backend/requirements-cloudrun.txt ./
 RUN pip install --no-cache-dir -r requirements-cloudrun.txt
 
-COPY processing_indexing ./processing_indexing
-COPY query_retrieval ./query_retrieval
-COPY test_assets/media/public_demo ./test_assets/media/public_demo
+COPY aperture-backend/processing_indexing ./processing_indexing
+COPY aperture-backend/query_retrieval ./query_retrieval
+COPY aperture-backend/test_assets/media/public_demo ./test_assets/media/public_demo
 RUN if [ ! -f test_assets/media/public_demo/animal_belly_rub.webm ]; then \
         curl --fail --location --retry 3 \
         --output test_assets/media/public_demo/animal_belly_rub.webm \

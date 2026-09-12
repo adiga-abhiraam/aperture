@@ -14,7 +14,7 @@ def frontend_dist_dir() -> Path:
     configured = os.environ.get("FRONTEND_DIST_DIR", "").strip()
     if configured:
         return Path(configured).resolve()
-    return (Path(__file__).resolve().parents[1] / "video_search_frontend" / "dist").resolve()
+    return (Path(__file__).resolve().parents[2] / "aperture-frontend" / "video_search_frontend" / "dist").resolve()
 
 
 def install_frontend(app: FastAPI, dist_dir: Path | None = None) -> bool:
