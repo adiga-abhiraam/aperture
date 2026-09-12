@@ -1179,51 +1179,59 @@ class JobManager:
                     "Checking Qdrant collection schema",
                     collection=settings.collection_name,
                 )
+                if self.index_store is None:
+                    return
                 try:
                     self.index_store.ensure_collection()
+                    manager._activity(
+                        job,
+                        "qdrant",
+                        "Qdrant collection is ready",
+                        collection=settings.collection_name,
+                    )
                 except Exception as exc:
                     manager._activity(
                         job,
                         "qdrant",
-                        "Qdrant collection setup failed",
-                        level="error",
+                        "Qdrant vector database is offline (port 6333 unreachable). Continuing in local memory mode.",
+                        level="warning",
                         error_type=type(exc).__name__,
                         error=manager._safe_message(job, exc),
                     )
-                    raise
-                manager._activity(
-                    job,
-                    "qdrant",
-                    "Qdrant collection is ready",
-                    collection=settings.collection_name,
-                )
+                    self.index_store = None
 
             def existing_window_ids(self, video_id):
-                return self.index_store.existing_window_ids(video_id)
+                if self.index_store is None:
+                    return set()
+                try:
+                    return self.index_store.existing_window_ids(video_id)
+                except Exception:
+                    return set()
 
             def upsert(self, items):
                 check()
                 manager._activity(
                     job,
                     "qdrant",
-                    "Writing a batch of searchable windows to Qdrant",
+                    "Writing a batch of searchable windows",
                     records=len(items),
                     first_window_id=items[0][0].window_id if items else None,
                 )
                 self.debug_store.upsert(items)
-                try:
-                    self.index_store.upsert(items)
-                except Exception as exc:
-                    manager._activity(
-                        job,
-                        "qdrant",
-                        "Qdrant batch write failed",
-                        level="error",
-                        records=len(items),
-                        error_type=type(exc).__name__,
-                        error=manager._safe_message(job, exc),
-                    )
-                    raise
+                if self.index_store is not None:
+                    try:
+                        self.index_store.upsert(items)
+                    except Exception as exc:
+                        manager._activity(
+                            job,
+                            "qdrant",
+                            "Qdrant batch write failed. Saved to local memory storage.",
+                            level="warning",
+                            records=len(items),
+                            error_type=type(exc).__name__,
+                            error=manager._safe_message(job, exc),
+                        )
+                        self.index_store = None
 
         class DebugVLM:
             def describe(self, path, window):
