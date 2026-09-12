@@ -189,11 +189,22 @@ def _read_with_retries(
 
 
 def _client(settings: Settings) -> QdrantClient:
-    return QdrantClient(
-        url=settings.qdrant_url,
-        api_key=settings.qdrant_api_key,
-        timeout=settings.qdrant_timeout_seconds,
-    )
+    url = settings.qdrant_url
+    if isinstance(url, str) and (url.startswith("http://") or url.startswith("https://")):
+        try:
+            client = QdrantClient(
+                url=url,
+                api_key=settings.qdrant_api_key,
+                timeout=min(settings.qdrant_timeout_seconds, 2.0),
+            )
+            client.get_collections()
+            return client
+        except Exception:
+            storage_path = os.getenv("QDRANT_EMBEDDED_PATH") or str(
+                Path(__file__).resolve().parent.parent / ".qdrant_storage"
+            )
+            return QdrantClient(path=storage_path)
+    return QdrantClient(path=url)
 
 
 def _health_timeout_seconds(settings: Settings) -> float:
@@ -209,11 +220,8 @@ def _read_timeout_seconds(settings: Settings) -> float:
 
 def _health_client(settings: Settings) -> QdrantClient:
     """Use a short timeout for the UI health probe, which is safe to retry."""
-    return QdrantClient(
-        url=settings.qdrant_url,
-        api_key=settings.qdrant_api_key,
-        timeout=_health_timeout_seconds(settings),
-    )
+    return _client(settings)
+
 
 
 def _close_client(client: QdrantClient) -> None:

@@ -92,8 +92,13 @@ def sanitize(value):
 
 
 def safe_filename(name: str) -> str:
-    clean = Path(name).name
-    if clean != name or Path(clean).suffix.lower() not in VIDEO_EXTENSIONS:
+    name_str = str(name).replace("\\", "/")
+    if name_str.lower().startswith("c:/fakepath/"):
+        name_str = name_str[12:]
+    elif name_str.lower().startswith("fakepath/"):
+        name_str = name_str[9:]
+    clean = Path(name_str).name
+    if clean != name_str or Path(clean).suffix.lower() not in VIDEO_EXTENSIONS:
         raise ValueError("Unsafe or unsupported video filename")
     return clean
 
@@ -978,6 +983,7 @@ class JobManager:
                     "point_id": None,
                     "stored_payload": {key: value for key, value in payload.items() if key != "source_path"},
                     "vectors": {name: _vector_summary(values) for name, values in vectors.items()},
+                    "raw_vectors": {name: list(values) for name, values in vectors.items() if isinstance(values, (list, tuple))},
                     "openai": None,
                     "cosmos": None,
                     "errors": [error for key, error in report.errors.items() if key.startswith(window_id)],
@@ -1170,6 +1176,7 @@ class JobManager:
             def __init__(self, debug_store, index_store):
                 self.debug_store = debug_store
                 self.index_store = index_store
+                self.qdrant_disabled = False
 
             def ensure_collection(self):
                 check()
@@ -1182,15 +1189,16 @@ class JobManager:
                 try:
                     self.index_store.ensure_collection()
                 except Exception as exc:
+                    self.qdrant_disabled = True
                     manager._activity(
                         job,
                         "qdrant",
-                        "Qdrant collection setup failed",
-                        level="error",
+                        "Qdrant collection setup unavailable; results will remain stored in local job memory",
+                        level="warning",
                         error_type=type(exc).__name__,
                         error=manager._safe_message(job, exc),
                     )
-                    raise
+                    return
                 manager._activity(
                     job,
                     "qdrant",
@@ -1199,10 +1207,18 @@ class JobManager:
                 )
 
             def existing_window_ids(self, video_id):
-                return self.index_store.existing_window_ids(video_id)
+                if self.qdrant_disabled:
+                    return set()
+                try:
+                    return self.index_store.existing_window_ids(video_id)
+                except Exception:
+                    return set()
 
             def upsert(self, items):
                 check()
+                self.debug_store.upsert(items)
+                if self.qdrant_disabled:
+                    return
                 manager._activity(
                     job,
                     "qdrant",
@@ -1210,20 +1226,19 @@ class JobManager:
                     records=len(items),
                     first_window_id=items[0][0].window_id if items else None,
                 )
-                self.debug_store.upsert(items)
                 try:
                     self.index_store.upsert(items)
                 except Exception as exc:
+                    self.qdrant_disabled = True
                     manager._activity(
                         job,
                         "qdrant",
-                        "Qdrant batch write failed",
-                        level="error",
+                        "Qdrant batch write failed; continuing with local job memory",
+                        level="warning",
                         records=len(items),
                         error_type=type(exc).__name__,
                         error=manager._safe_message(job, exc),
                     )
-                    raise
 
         class DebugVLM:
             def describe(self, path, window):

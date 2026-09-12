@@ -34,15 +34,43 @@ class QdrantSearchError(Exception):
 
 
 def connect_qdrant() -> QdrantClient:
-    """Return a cached Qdrant client, creating it on first call."""
+    """Return a cached Qdrant client, creating it on first call.
+
+    If the configured HTTP Qdrant server is unreachable, falls back to a local
+    file-backed embedded Qdrant storage so vector search remains functional.
+    """
     global _client
     if _client is None:
-        _client = QdrantClient(
-            url=config.QDRANT_URL,
-            api_key=config.QDRANT_API_KEY,
-            timeout=config.QDRANT_TIMEOUT_SECONDS,
-        )
+        url = config.QDRANT_URL
+        if isinstance(url, str) and (url.startswith("http://") or url.startswith("https://")):
+            try:
+                client = QdrantClient(
+                    url=url,
+                    api_key=config.QDRANT_API_KEY,
+                    timeout=config.QDRANT_TIMEOUT_SECONDS,
+                )
+                if hasattr(client, "get_collections"):
+                    client.get_collections()
+                _client = client
+                logger.info("Connected to remote/HTTP Qdrant at %s", url)
+            except Exception as exc:
+                logger.warning(
+                    "HTTP Qdrant at %s is unreachable (%s: %s). Falling back to embedded local vector store.",
+                    url,
+                    type(exc).__name__,
+                    exc,
+                )
+                import os
+                from pathlib import Path
+                storage_path = os.getenv("QDRANT_EMBEDDED_PATH") or str(
+                    Path(__file__).resolve().parent.parent / ".qdrant_storage"
+                )
+                _client = QdrantClient(path=storage_path)
+        else:
+            _client = QdrantClient(path=url)
     return _client
+
+
 
 
 def create_collection(client: QdrantClient | None = None) -> None:

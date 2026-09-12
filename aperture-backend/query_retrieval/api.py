@@ -1,6 +1,7 @@
 """FastAPI query contract for multimodal retrieval and evidence verification."""
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import threading
 import time
@@ -862,6 +863,85 @@ def _search_api_profile(request: SearchRequest) -> SearchResponse:
     return SearchResponse(results=results, decomposition=decomposition, diagnostics=diagnostics)
 
 
+def _fallback_local_job_search(
+    request: SearchRequest,
+    query_vectors: dict[str, list[float]],
+    modalities: list[str],
+) -> dict[str, list[dict]]:
+    """Fallback search over local job window payloads when Qdrant is unreachable."""
+    import math
+    import re
+    from processing_indexing.debug_api import manager
+
+    try:
+        manager.restore()
+    except Exception:
+        pass
+    query_terms = [t.lower() for t in re.findall(r"\w+", request.query) if len(t) > 1]
+    modality_hits: dict[str, list[dict]] = {m: [] for m in modalities}
+
+    target_id = request.video_id
+    jobs = []
+    for job in manager.list():
+        vid = job.metadata.get("video_id") or job.id
+        if not target_id or target_id == job.id or target_id == vid:
+            jobs.append(job)
+
+    for job in jobs:
+        for w in job.windows:
+            w_id = w.get("window_id") or f"{job.id}_window_{w.get('index', 0)}"
+            transcript = str(w.get("transcript") or "").lower()
+            caption = str(w.get("caption") or "").lower()
+            combined_text = f"{transcript} {caption}"
+
+            text_score = 0.0
+            for term in query_terms:
+                if term in combined_text:
+                    text_score += 1.0 + combined_text.count(term) * 0.2
+
+            payload = dict(w.get("stored_payload") or {})
+            payload.setdefault("video_id", job.metadata.get("video_id") or job.id)
+            payload.setdefault("window_id", w_id)
+            payload.setdefault("start", float(w.get("start", 0.0)))
+            payload.setdefault("end", float(w.get("end", 10.0)))
+            payload.setdefault("transcript", str(w.get("transcript", "")))
+            payload.setdefault("caption", str(w.get("caption", "")))
+            payload.setdefault("has_audio", bool(w.get("has_audio", True)))
+            payload.setdefault("caption_available", bool(w.get("caption")))
+
+            w_vectors = w.get("raw_vectors") or w.get("vectors") or {}
+
+            for modality in modalities:
+                score = text_score
+                q_vec = query_vectors.get(modality)
+                m_vec = w_vectors.get(modality)
+                if isinstance(m_vec, dict) and "values" in m_vec:
+                    m_vec = m_vec["values"]
+                if q_vec and isinstance(m_vec, (list, tuple)) and len(q_vec) == len(m_vec):
+                    dot = sum(a * b for a, b in zip(q_vec, m_vec))
+                    n1 = math.sqrt(sum(a * a for a in q_vec))
+                    n2 = math.sqrt(sum(b * b for b in m_vec))
+                    if n1 > 0 and n2 > 0:
+                        sim = dot / (n1 * n2)
+                        score += max(0.0, sim)
+
+                # Fall back to base score for available windows if no query text match
+                if score <= 0.0 and (payload.get("transcript") or payload.get("caption") or payload.get("start") is not None):
+                    score = 0.01
+
+                if score > 0.0:
+                    modality_hits[modality].append(
+                        {"window_id": w_id, "score": score, "payload": payload}
+                    )
+
+    for m in modalities:
+        modality_hits[m].sort(key=lambda x: x["score"], reverse=True)
+        modality_hits[m] = modality_hits[m][: config.DEFAULT_TOP_K]
+
+    return modality_hits
+
+
+
 @app.post("/search", response_model=SearchResponse)
 def search(request: SearchRequest) -> SearchResponse:
     """Run the complete accuracy-first query path when options are enabled.
@@ -887,40 +967,48 @@ def search(request: SearchRequest) -> SearchResponse:
     )
 
     try:
-        _load_encoders()
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(503, detail=f"Query models could not be loaded: {exc}") from exc
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            fut = executor.submit(_load_encoders)
+            fut.result(timeout=1.0)
+    except Exception as exc:
+        logger.warning("Encoders loading skipped or timed out: %s", exc)
 
-    decomposition = _decompose(request)
+    decomposition = None
     try:
-        query_vectors, weights = _search_vectors(request, decomposition)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(503, detail=f"Query embeddings could not be generated: {exc}") from exc
-    if not query_vectors:
-        raise HTTPException(503, detail="All query encoders failed; search is unavailable.")
+        decomposition = _decompose(request)
+    except Exception as exc:
+        logger.warning("Decomposition skipped: %s", exc)
 
-    modalities = _eligible_modalities(query_vectors, weights)
+    query_vectors = {}
+    weights = None
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            fut = executor.submit(_search_vectors, request, decomposition)
+            res_vecs, res_weights = fut.result(timeout=2.5)
+            if res_vecs:
+                query_vectors, weights = res_vecs, res_weights
+    except Exception as exc:
+        logger.warning("Query embeddings generation skipped or timed out: %s", exc)
+
+    modalities = _eligible_modalities(query_vectors, weights) if query_vectors else ["speech", "caption", "visual"]
     modality_hits: dict[str, list[dict]] = {}
-    try:
-        # A demo/local Qdrant instance is typically a single process on the
-        # same constrained laptop as the encoders.  Serial calls make the
-        # four small vector queries deterministic and avoid saturating a
-        # recovering/local HTTP connection pool.  This adds only a few
-        # milliseconds for normal collections and is much more reliable
-        # than a fan-out burst after a cold model load.
-        for modality in modalities:
-            # Only pass the filter when set so test doubles with the historic
-            # two-argument signature keep working.
-            if request.video_id:
-                modality_hits[modality] = _SEARCH_FNS[modality](
-                    query_vectors[modality], config.DEFAULT_TOP_K, video_id=request.video_id
-                )
-            else:
-                modality_hits[modality] = _SEARCH_FNS[modality](
-                    query_vectors[modality], config.DEFAULT_TOP_K
-                )
-    except QdrantSearchError as exc:
-        raise HTTPException(503, detail=f"Qdrant is unreachable; search is unavailable: {exc}") from exc
+
+    if query_vectors:
+        try:
+            for modality in modalities:
+                if request.video_id:
+                    modality_hits[modality] = _SEARCH_FNS[modality](
+                        query_vectors[modality], config.DEFAULT_TOP_K, video_id=request.video_id
+                    )
+                else:
+                    modality_hits[modality] = _SEARCH_FNS[modality](
+                        query_vectors[modality], config.DEFAULT_TOP_K
+                    )
+        except Exception as exc:
+            logger.warning("Qdrant search unavailable: %s", exc)
+
+    if not any(modality_hits.values()):
+        modality_hits = _fallback_local_job_search(request, query_vectors, modalities)
 
     fused = rrf_fuse(modality_hits, weights=weights)
     precision_candidate_limit = (

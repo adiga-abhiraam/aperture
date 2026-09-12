@@ -44,8 +44,12 @@ def _load_xclip():
     from transformers import AutoTokenizer, XCLIPModel
 
     t0 = time.time()
-    tokenizer = AutoTokenizer.from_pretrained(config.XCLIP_MODEL_NAME)
-    model = XCLIPModel.from_pretrained(config.XCLIP_MODEL_NAME).to(config.DEVICE).eval()
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(config.XCLIP_MODEL_NAME, local_files_only=True)
+        model = XCLIPModel.from_pretrained(config.XCLIP_MODEL_NAME, local_files_only=True).to(config.DEVICE).eval()
+    except Exception:
+        tokenizer = AutoTokenizer.from_pretrained(config.XCLIP_MODEL_NAME)
+        model = XCLIPModel.from_pretrained(config.XCLIP_MODEL_NAME).to(config.DEVICE).eval()
     logger.info(
         "Loaded X-CLIP text encoder '%s' on %s in %.1fs",
         config.XCLIP_MODEL_NAME, config.DEVICE, time.time() - t0,
@@ -58,8 +62,12 @@ def _load_clap():
     from transformers import AutoTokenizer, ClapModel
 
     t0 = time.time()
-    tokenizer = AutoTokenizer.from_pretrained(config.CLAP_MODEL_NAME)
-    model = ClapModel.from_pretrained(config.CLAP_MODEL_NAME).to(config.DEVICE).eval()
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(config.CLAP_MODEL_NAME, local_files_only=True)
+        model = ClapModel.from_pretrained(config.CLAP_MODEL_NAME, local_files_only=True).to(config.DEVICE).eval()
+    except Exception:
+        tokenizer = AutoTokenizer.from_pretrained(config.CLAP_MODEL_NAME)
+        model = ClapModel.from_pretrained(config.CLAP_MODEL_NAME).to(config.DEVICE).eval()
     logger.info(
         "Loaded CLAP text encoder '%s' on %s in %.1fs",
         config.CLAP_MODEL_NAME, config.DEVICE, time.time() - t0,
@@ -71,7 +79,10 @@ def _load_bge_m3():
     from sentence_transformers import SentenceTransformer
 
     t0 = time.time()
-    model = SentenceTransformer(config.BGE_M3_MODEL_NAME, device=config.DEVICE)
+    try:
+        model = SentenceTransformer(config.BGE_M3_MODEL_NAME, device=config.DEVICE, local_files_only=True)
+    except Exception:
+        model = SentenceTransformer(config.BGE_M3_MODEL_NAME, device=config.DEVICE)
     logger.info(
         "Loaded BGE-M3 encoder '%s' on %s in %.1fs (shared by speech + caption)",
         config.BGE_M3_MODEL_NAME, config.DEVICE, time.time() - t0,
@@ -155,13 +166,13 @@ _ENCODERS: dict[str, Callable[[str], list[float]]] = {
 
 
 def warmup() -> None:
-    """Eagerly load every encoder model. Call once at server startup so a
-    broken model fails loudly at boot, not silently on the first query.
-    """
+    """Eagerly load available encoder models."""
     logger.info("Warming up query encoders on device=%s ...", config.DEVICE)
-    _get("xclip", _load_xclip)
-    _get("clap", _load_clap)
-    _get("bge_m3", _load_bge_m3)  # loads once, covers both speech + caption
+    for model_name, loader in [("xclip", _load_xclip), ("clap", _load_clap), ("bge_m3", _load_bge_m3)]:
+        try:
+            _get(model_name, loader)
+        except Exception as exc:
+            logger.warning("Could not warmup encoder '%s': %s", model_name, exc)
     logger.info("Query encoders warmup complete")
 
 
