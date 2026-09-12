@@ -314,6 +314,100 @@ export interface IndexResponse {
   vectors_are_placeholder: boolean
 }
 
+export interface ProcessingJob {
+  job_id: string
+  status: string
+  stage: string
+  progress: number
+  current_window: number
+  total_windows: number
+  elapsed_seconds: number
+  summary: Record<string, unknown>
+  errors: Array<{ message: string; window_id?: string }>
+}
+
+export interface ProcessingWindow {
+  index: number
+  window_id: string
+  start: number
+  end: number
+  transcript: string
+  caption: string
+  indexed: boolean
+  point_id: string | null
+  vectors: Record<string, { shape: number[]; norm: number; min: number; max: number; finite: boolean }>
+}
+
+export interface IndexHealth {
+  reachable: boolean
+  collection_exists: boolean
+  collection_name: string
+  points_count: number
+  schema_valid?: boolean
+  error?: string
+}
+
+const TERMINAL_JOB_STATUSES = new Set(['complete', 'completed', 'completed_with_errors', 'partial', 'failed', 'cancelled'])
+
+async function responseErrorDetail(response: Response): Promise<string> {
+  const text = await response.text()
+  try {
+    const parsed = JSON.parse(text)
+    if (typeof parsed?.detail === 'string') return parsed.detail
+    if (parsed?.detail) return JSON.stringify(parsed.detail)
+    if (typeof parsed?.error?.message === 'string') return parsed.error.message
+  } catch {
+    // not JSON
+  }
+  return text || response.statusText
+}
+
+export async function createProcessingJob(video: File): Promise<ProcessingJob> {
+  const body = new FormData()
+  body.append('video', video, video.name || 'upload.mp4')
+  body.append('configuration', JSON.stringify({
+    profile_id: 'self-hosted-v1',
+    device: 'cpu',
+    window_seconds: 10,
+    stride_seconds: 5,
+    max_windows: 0,
+    vlm_mode: 'selection_only',
+    index_qdrant: true,
+  }))
+  const response = await fetch(`${API_BASE_URL}/api/processing/jobs`, { method: 'POST', body })
+  if (!response.ok) throw new SearchApiError(await responseErrorDetail(response))
+  return response.json() as Promise<ProcessingJob>
+}
+
+export async function startProcessingJob(jobId: string): Promise<ProcessingJob> {
+  const response = await fetch(`${API_BASE_URL}/api/processing/jobs/${encodeURIComponent(jobId)}/start`, { method: 'POST' })
+  if (!response.ok) throw new SearchApiError(await responseErrorDetail(response))
+  return response.json() as Promise<ProcessingJob>
+}
+
+export async function getProcessingJob(jobId: string): Promise<ProcessingJob> {
+  const response = await fetch(`${API_BASE_URL}/api/processing/jobs/${encodeURIComponent(jobId)}`)
+  if (!response.ok) throw new SearchApiError(await responseErrorDetail(response))
+  return response.json() as Promise<ProcessingJob>
+}
+
+export async function getProcessingWindows(jobId: string): Promise<ProcessingWindow[]> {
+  const response = await fetch(`${API_BASE_URL}/api/processing/jobs/${encodeURIComponent(jobId)}/windows`)
+  if (!response.ok) throw new SearchApiError(await responseErrorDetail(response))
+  const payload = await response.json() as { windows: ProcessingWindow[] }
+  return payload.windows
+}
+
+export function isProcessingJobTerminal(status: string): boolean {
+  return TERMINAL_JOB_STATUSES.has(status)
+}
+
+export async function getIndexHealth(): Promise<IndexHealth> {
+  const response = await fetch(`${API_BASE_URL}/api/index/health`)
+  if (!response.ok) throw new SearchApiError(await responseErrorDetail(response))
+  return response.json() as Promise<IndexHealth>
+}
+
 export async function runIndex(video: File, signal?: AbortSignal): Promise<IndexResponse> {
   const body = new FormData()
   body.append('video', video, video.name || 'video.mp4')

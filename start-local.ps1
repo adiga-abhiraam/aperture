@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 $Root = $PSScriptRoot
 $Backend = Join-Path $Root "aperture-backend"
 $Python = Join-Path $Root ".venv\Scripts\python.exe"
-$Frontend = if (Test-Path (Join-Path $Root "video_search_frontend")) { Join-Path $Root "video_search_frontend" } else { Join-Path $Root "aperture-frontend" }
+$Frontend = Join-Path $Root "aperture-frontend\video_search_frontend"
 $ModelCache = Join-Path $Root ".model-cache"
 $UploadTemp = Join-Path $Root ".tmp\uploads"
 
@@ -178,11 +178,11 @@ else {
     Write-Host "The processing API is already running."
 }
 
-if ($Restart -and (Test-LocalPort 3000)) {
-    Stop-LocalListener -Port 3000 -ServiceName "browser UI"
+if ($Restart -and (Test-LocalPort 5173)) {
+    Stop-LocalListener -Port 5173 -ServiceName "Vite browser UI"
 }
 
-if (-not (Test-LocalUrl "http://127.0.0.1:3000")) {
+if (-not (Test-LocalUrl "http://127.0.0.1:5173")) {
     $Npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
     if (-not $Npm) {
         throw "Node.js and npm are required. Install Node.js, then run .\start-local.ps1 again."
@@ -191,8 +191,8 @@ if (-not (Test-LocalUrl "http://127.0.0.1:3000")) {
     $EscapedNpm = $Npm.Source.Replace("'", "''")
     $FrontendScript = @"
 Set-Location -LiteralPath '$EscapedFrontend'
-`$env:NEXT_PUBLIC_API_URL = 'http://127.0.0.1:8000'
-& '$EscapedNpm' run dev -- --hostname 127.0.0.1 --port 3000
+`$env:VITE_SEARCH_API_URL = 'http://127.0.0.1:8000'
+& '$EscapedNpm' run dev -- --host 127.0.0.1 --port 5173
 "@
     Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", (ConvertTo-EncodedPowerShell $FrontendScript)) -WindowStyle Hidden
     Write-Host "Started the browser UI."
@@ -202,7 +202,7 @@ else {
 }
 
 Write-Host ""
-Write-Host "Open http://127.0.0.1:3000"
+Write-Host "Open http://127.0.0.1:5173"
 if ($ApiOnly) {
     Write-Host "If this is the first run, wait briefly for the API and browser UI to finish starting."
 }

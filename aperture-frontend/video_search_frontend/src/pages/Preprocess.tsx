@@ -4,7 +4,12 @@ import { PageShell } from '../components/PageShell'
 import { ConnectorGrid } from '../components/ConnectorGrid'
 import { StageSequence } from '../components/StageSequence'
 import { INDEX_STAGES } from '../lib/stages'
-import { runIndex, SearchApiError, type IndexResponse, type IndexWindow } from '../lib/api'
+import {
+  runIndex,
+  SearchApiError,
+  type IndexResponse,
+  type IndexWindow,
+} from '../lib/api'
 import { formatTimestamp, formatBytes } from '../lib/format'
 import { useLanguage } from '../lib/settings'
 import { stringsFor, type Strings } from '../lib/i18n'
@@ -17,7 +22,7 @@ const STAGE_LABELS: Record<string, string> = {
   transcript: 'Transcribing speech',
   captioning: 'Captioning each window',
   embedding: 'Building vectors',
-  persisting: 'Writing to the index',
+  persisting: 'Preparing the local result',
 }
 
 function WindowRow({
@@ -114,8 +119,8 @@ function WindowRow({
                 </div>
               ))}
             </div>
-            <p className="mt-1.5 text-[10px] text-amber-200/60">
-              {t.placeholderVectors}
+            <p className="mt-1.5 text-[10px] text-paper-300/45">
+              These vectors are generated for this preview and are not persisted.
             </p>
           </div>
         </div>
@@ -167,7 +172,7 @@ export function Preprocess() {
     try {
       setResult(await runIndex(file))
     } catch (cause) {
-      setError(cause instanceof SearchApiError ? cause.message : 'Indexing could not be completed.')
+      setError(cause instanceof SearchApiError || cause instanceof Error ? cause.message : 'Indexing could not be completed.')
     } finally {
       setBusy(false)
     }
@@ -178,6 +183,7 @@ export function Preprocess() {
   return (
     <PageShell heroHeight="75vh">
       <div className="mx-auto w-full max-w-3xl px-6 pb-24 pt-8">
+        <p className="font-mono text-[11px] uppercase tracking-[0.24em] text-glow">Self-Hosted Local AI Engine</p>
         <h1
           className="text-5xl leading-tight tracking-tight text-white md:text-6xl"
           style={{ fontFamily: "'Instrument Serif', serif" }}
@@ -185,7 +191,7 @@ export function Preprocess() {
           {t.buildIndexTitle} <span className="italic text-glow">{t.buildIndexEmphasis}</span>
         </h1>
         <p className="mt-5 max-w-2xl text-base leading-relaxed text-white/70">
-{t.buildIndexSubtitle}
+          {t.buildIndexSubtitle}
         </p>
 
         <div className="mt-10">
@@ -207,9 +213,8 @@ export function Preprocess() {
               const dropped = event.dataTransfer.files?.[0]
               if (dropped) setFile(dropped)
             }}
-            className={`liquid-glass flex cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed px-5 py-8 text-center transition-colors ${
-              dragActive ? 'border-glow bg-glow/5' : 'border-white/15 bg-ink-900/50'
-            }`}
+            className={`liquid-glass flex cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed px-5 py-8 text-center transition-colors ${dragActive ? 'border-glow bg-glow/5' : 'border-white/15 bg-ink-900/50'
+              }`}
           >
             <UploadCloud size={24} className={dragActive ? 'text-glow' : 'text-paper-300/50'} />
             <p className="text-sm text-paper-100">

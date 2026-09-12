@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test'
 test('fresh visitor reaches launch demo without technical onboarding', async ({ page }) => {
   await page.goto('/')
   await expect(page.getByRole('heading', { name: /Search any video archive/i })).toBeVisible()
-  await expect(page.getByText('No account needed · 2 free live searches · 13 Indian languages')).toBeVisible()
+  await expect(page.getByText('No account needed · 13 Indian languages')).toBeVisible()
   await expect(page.getByText(/choose a deployment profile/i)).toHaveCount(0)
   await expect(page.getByText(/paste an api key/i)).toHaveCount(0)
   await expect(page.getByRole('button', { name: /Animals enjoying belly rubs/i })).toBeVisible()

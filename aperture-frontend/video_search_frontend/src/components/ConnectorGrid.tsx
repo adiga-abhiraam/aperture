@@ -7,7 +7,6 @@ import {
   FolderOpen,
   HardDrive,
   KeyRound,
-  Layers,
   Network,
   Server,
 } from 'lucide-react'
@@ -60,18 +59,6 @@ const CONNECTORS: Connector[] = [
       { key: 'supabase_url', label: 'Project URL', placeholder: 'https://xxxx.supabase.co' },
       { key: 'supabase', label: 'Service role key', placeholder: 'eyJ...', secret: true },
       { key: 'supabase_bucket', label: 'Storage bucket', placeholder: 'videos' },
-    ],
-  },
-  {
-    id: 'qdrant',
-    name: 'Qdrant',
-    detail: 'Vector collection',
-    icon: Layers,
-    wired: false,
-    fields: [
-      { key: 'qdrant_url', label: 'Cluster URL', placeholder: 'https://xxxx.qdrant.io:6333' },
-      { key: 'qdrant', label: 'API key', placeholder: 'qdr_...', secret: true },
-      { key: 'qdrant_collection', label: 'Collection', placeholder: 'video_windows' },
     ],
   },
   {
@@ -212,11 +199,10 @@ export function ConnectorGrid({ strings: t, onError }: ConnectorGridProps) {
               key={connector.id}
               type="button"
               onClick={() => setActive(isActive ? null : connector.id)}
-              className={`flex flex-col items-start gap-1.5 rounded-xl border p-3 text-left transition-colors ${
-                isActive
+              className={`flex flex-col items-start gap-1.5 rounded-xl border p-3 text-left transition-colors ${isActive
                   ? 'border-glow bg-glow/10'
                   : 'border-white/10 bg-ink-800/60 hover:border-white/25'
-              }`}
+                }`}
             >
               <Icon size={16} className={isActive ? 'text-glow' : 'text-paper-300/60'} />
               <span className="text-xs font-medium text-paper-100">{connector.name}</span>

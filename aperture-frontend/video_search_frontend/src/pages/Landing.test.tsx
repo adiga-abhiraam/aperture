@@ -37,7 +37,7 @@ describe('public launch landing page', () => {
     expect(screen.queryByText(/choose a deployment profile/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/paste an api key/i)).not.toBeInTheDocument()
     expect(await screen.findByRole('button', { name: /Animals enjoying belly rubs/i })).toBeInTheDocument()
-    expect(screen.getByText(/2 free live searches remaining today/i)).toBeInTheDocument()
+    expect(screen.getByText(/No account needed  · 13 Indian languages/i)).toBeInTheDocument()
   })
 
   it('fills a suggested query without starting a paid search', async () => {
