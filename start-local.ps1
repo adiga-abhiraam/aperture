@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 $Root = $PSScriptRoot
 $Backend = Join-Path $Root "aperture-backend"
 $Python = Join-Path $Root ".venv\Scripts\python.exe"
-$Frontend = Join-Path $Root "aperture-frontend" "processing_debug_frontend"
+$Frontend = Join-Path (Join-Path $Root "aperture-frontend") "processing_debug_frontend"
 $ModelCache = Join-Path $Root ".model-cache"
 $UploadTemp = Join-Path $Root ".tmp\uploads"
 
