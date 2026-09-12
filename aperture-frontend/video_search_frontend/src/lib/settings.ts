@@ -14,17 +14,21 @@ export interface ModelChoice {
 }
 
 export const QUERY_MODELS: readonly ModelChoice[] = [
-  { id: 'self-hosted-engine', label: 'Self-Hosted Local Engine (Whisper + X-CLIP + CLAP + BGE-M3)', provider: 'gemini' },
+  { id: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite', provider: 'gemini' },
+  { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite', provider: 'gemini' },
 ]
 
 export const INDEX_MODELS: readonly ModelChoice[] = [
-  { id: 'self-hosted-engine', label: 'Self-Hosted Local Engine (Whisper + X-CLIP + CLAP + BGE-M3)', provider: 'gemini' },
+  { id: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite', provider: 'gemini' },
+  { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite', provider: 'gemini' },
+  { id: 'gpt-4.1-mini', label: 'OpenAI GPT-4.1 mini', provider: 'openai' },
+  { id: 'gpt-5-mini', label: 'OpenAI GPT-5 mini', provider: 'openai' },
 ]
 
 export type ModelId = string
 
-export const DEFAULT_MODEL = 'self-hosted-engine'
-export const DEFAULT_INDEX_MODEL = 'self-hosted-engine'
+export const DEFAULT_MODEL = 'gemini-3.1-flash-lite'
+export const DEFAULT_INDEX_MODEL = 'gemini-3.1-flash-lite'
 
 export function providerOf(id: string, options: readonly ModelChoice[]): string {
   return options.find((option) => option.id === id)?.provider ?? 'gemini'
@@ -77,7 +81,8 @@ const INDEX_MODEL_KEY = 'footageask.indexModel'
 const LANGUAGE_KEY = 'footageask.language'
 
 export function getModel(): string {
-  return readLocal(MODEL_KEY, DEFAULT_MODEL)
+  const value = readLocal(MODEL_KEY, DEFAULT_MODEL)
+  return value === 'self-hosted-engine' ? DEFAULT_MODEL : value
 }
 
 export function setModel(model: string): void {
@@ -89,7 +94,8 @@ export function useModel() {
 }
 
 export function getIndexModel(): string {
-  return readLocal(INDEX_MODEL_KEY, DEFAULT_INDEX_MODEL)
+  const value = readLocal(INDEX_MODEL_KEY, DEFAULT_INDEX_MODEL)
+  return value === 'self-hosted-engine' ? DEFAULT_INDEX_MODEL : value
 }
 
 export function setIndexModel(model: string): void {
@@ -112,7 +118,8 @@ export function useLanguage() {
   return useStoredValue(getLanguage, setLanguage)
 }
 
-// Keys live in sessionStorage: cleared when the tab closes, never on disk.
+// Keys live in sessionStorage only. When none is set the backend uses the
+// keys from its own .env, so nothing secret is ever compiled into the bundle.
 export function getApiKey(provider: string): string {
   try {
     return window.sessionStorage.getItem(`footageask.key.${provider}`) || ''

@@ -52,9 +52,8 @@ export function Onboarding({ onDone }: OnboardingProps) {
           {ORDER.map((item, index) => (
             <span
               key={item}
-              className={`h-0.5 flex-1 rounded-full transition-colors ${
-                index <= position ? 'bg-glow' : 'bg-white/10'
-              }`}
+              className={`h-0.5 flex-1 rounded-full transition-colors ${index <= position ? 'bg-glow' : 'bg-white/10'
+                }`}
             />
           ))}
         </div>
@@ -87,11 +86,10 @@ export function Onboarding({ onDone }: OnboardingProps) {
                   onClick={() => {
                     setLocalLanguage(option.code)
                   }}
-                  className={`rounded-lg border px-2.5 py-2 text-xs transition-colors ${
-                    option.code === language
+                  className={`rounded-lg border px-2.5 py-2 text-xs transition-colors ${option.code === language
                       ? 'border-glow bg-glow/10 text-paper-100'
                       : 'border-white/10 bg-ink-800/60 text-paper-300/70 hover:border-white/25'
-                  }`}
+                    }`}
                 >
                   {stringsFor(option.code).nativeName}
                 </button>

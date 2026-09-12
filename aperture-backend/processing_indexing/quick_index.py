@@ -274,6 +274,8 @@ async def quick_index(
     """Segment one video into indexed windows with a single model call."""
 
     resolved_model = (model or "").strip() or DEFAULT_MODEL
+    if resolved_model in ("self-hosted-engine", "self-hosted"):
+        resolved_model = DEFAULT_MODEL
     resolved_key = _resolve_api_key(api_key, resolved_model)
 
     request_id = uuid.uuid4().hex

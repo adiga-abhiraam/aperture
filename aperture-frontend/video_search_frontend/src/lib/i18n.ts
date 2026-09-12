@@ -45,6 +45,7 @@ export interface Strings {
   startOver: string
   navHowItWorks: string
   navUpload: string
+  navDashboard: string
   navDesign: string
   navDeveloper: string
   matchSuffix: string
@@ -157,6 +158,7 @@ const en: Strings = {
   startOver: 'Start over',
   navHowItWorks: 'How it works',
   navUpload: 'Preprocess',
+  navDashboard: 'Dashboard',
   navDesign: 'Design',
   navDeveloper: 'Developer',
   matchSuffix: 'match',
@@ -171,7 +173,7 @@ const en: Strings = {
   buildIndexTitle: 'Build the',
   buildIndexEmphasis: 'index',
   buildIndexSubtitle:
-    'Upload long-form footage and watch it become time-aligned, searchable windows. Uses the indexing model selected in Developer settings.',
+    'Upload long-form footage and watch it become time-aligned, searchable windows.',
   uploadLongForm: 'Upload long-form video',
   connectSource: 'Connect a source',
   connectSourceHint: 'Point the index at footage you already have instead of uploading it.',
@@ -181,7 +183,7 @@ const en: Strings = {
   windowsIndexed: 'windows indexed',
   driveHint: 'Paste a folder link shared as “anyone with the link”.',
   driveWarning:
-    'Needs a Google Cloud project you administer, with the Drive API enabled. A key from AI Studio will not work: it belongs to a Google-managed project you cannot enable APIs on.',
+    'Requires a project you administer, with Drive access enabled.',
   videosFound: 'videos found',
   transcriptLabel: 'transcript',
   objectsLabel: 'objects',
@@ -247,7 +249,7 @@ const hi: Strings = {
   indexingNow: 'अनुक्रमण हो रहा है…',
   windowsIndexed: 'विंडो अनुक्रमित',
   driveHint: '“लिंक वाले किसी भी व्यक्ति” के रूप में साझा फ़ोल्डर लिंक चिपकाएँ।',
-  driveWarning: 'ऐसा Google Cloud प्रोजेक्ट चाहिए जिसका आप प्रशासन करते हों और जिसमें Drive API सक्षम हो। AI Studio की कुंजी काम नहीं करेगी।',
+  driveWarning: 'ऐसा प्रोजेक्ट चाहिए जिसका आप प्रशासन करते हों और जिसमें Drive सेवा सक्षम हो।',
   videosFound: 'वीडियो मिले',
   transcriptLabel: 'प्रतिलेख',
   objectsLabel: 'वस्तुएँ',
@@ -313,6 +315,7 @@ const hi: Strings = {
   startOver: 'फिर से शुरू करें',
   navHowItWorks: 'यह कैसे काम करता है',
   navUpload: 'प्रीप्रोसेस',
+  navDashboard: 'डैशबोर्ड',
   navDeveloper: 'डेवलपर',
   matchSuffix: 'मेल',
 }
@@ -331,7 +334,7 @@ const kn: Strings = {
   indexingNow: 'ಸೂಚಿಕೆ ಆಗುತ್ತಿದೆ…',
   windowsIndexed: 'ವಿಂಡೋಗಳು ಸೂಚಿಕೆಯಾಗಿವೆ',
   driveHint: '“ಲಿಂಕ್ ಇರುವ ಯಾರಾದರೂ” ಎಂದು ಹಂಚಿದ ಫೋಲ್ಡರ್ ಲಿಂಕ್ ಅಂಟಿಸಿ.',
-  driveWarning: 'ನೀವು ನಿರ್ವಹಿಸುವ Google Cloud ಯೋಜನೆ ಬೇಕು, Drive API ಸಕ್ರಿಯವಾಗಿರಬೇಕು. AI Studio ಕೀಲಿ ಕೆಲಸ ಮಾಡುವುದಿಲ್ಲ.',
+  driveWarning: 'ನೀವು ನಿರ್ವಹಿಸುವ ಯೋಜನೆ ಬೇಕು, Drive ಸೇವೆ ಸಕ್ರಿಯವಾಗಿರಬೇಕು.',
   videosFound: 'ವೀಡಿಯೊಗಳು ಸಿಕ್ಕಿವೆ',
   transcriptLabel: 'ಪ್ರತಿಲಿಪಿ',
   objectsLabel: 'ವಸ್ತುಗಳು',
@@ -397,6 +400,7 @@ const kn: Strings = {
   startOver: 'ಮತ್ತೆ ಪ್ರಾರಂಭಿಸಿ',
   navHowItWorks: 'ಇದು ಹೇಗೆ ಕೆಲಸ ಮಾಡುತ್ತದೆ',
   navUpload: 'ಪೂರ್ವಸಂಸ್ಕರಣೆ',
+  navDashboard: 'ಡ್ಯಾಶ್‌ಬೋರ್ಡ್',
   navDeveloper: 'ಡೆವಲಪರ್',
   matchSuffix: 'ಹೊಂದಾಣಿಕೆ',
 }
@@ -443,6 +447,7 @@ const bn: Strings = {
   startOver: 'আবার শুরু করুন',
   navHowItWorks: 'এটি কীভাবে কাজ করে',
   navUpload: 'প্রিপ্রসেস',
+  navDashboard: 'ড্যাশবোর্ড',
   navDeveloper: 'ডেভেলপার',
   matchSuffix: 'মিল',
 }
@@ -461,7 +466,7 @@ const ta: Strings = {
   indexingNow: 'அட்டவணையிடுகிறது…',
   windowsIndexed: 'சாளரங்கள் அட்டவணையிடப்பட்டன',
   driveHint: '“இணைப்பு உள்ள யாரும்” எனப் பகிரப்பட்ட கோப்புறை இணைப்பை ஒட்டவும்.',
-  driveWarning: 'நீங்கள் நிர்வகிக்கும் Google Cloud திட்டம் தேவை, Drive API இயக்கப்பட வேண்டும். AI Studio விசை வேலை செய்யாது.',
+  driveWarning: 'நீங்கள் நிர்வகிக்கும் திட்டம் தேவை, Drive சேவை இயக்கப்பட வேண்டும்.',
   videosFound: 'வீடியோக்கள் கிடைத்தன',
   transcriptLabel: 'எழுத்துப்படி',
   objectsLabel: 'பொருட்கள்',
@@ -527,6 +532,7 @@ const ta: Strings = {
   startOver: 'மீண்டும் தொடங்கு',
   navHowItWorks: 'இது எப்படி வேலை செய்கிறது',
   navUpload: 'முன்செயலாக்கம்',
+  navDashboard: 'டாஷ்போர்டு',
   navDeveloper: 'உருவாக்குநர்',
   matchSuffix: 'பொருத்தம்',
 }
@@ -573,6 +579,7 @@ const te: Strings = {
   startOver: 'మళ్లీ ప్రారంభించండి',
   navHowItWorks: 'ఇది ఎలా పనిచేస్తుంది',
   navUpload: 'ప్రీప్రాసెస్',
+  navDashboard: 'డాష్‌బోర్డ్',
   navDeveloper: 'డెవలపర్',
   matchSuffix: 'సరిపోలిక',
 }
