@@ -27,6 +27,7 @@ from fastapi import APIRouter, File, Form, Header, HTTPException, Request, Respo
 from fastapi.responses import FileResponse
 
 from .gemini_runtime import (
+    GeminiAuthenticationError,
     GeminiKeyPool,
     GeminiRuntimeError,
     GoogleGenAIRuntime,
@@ -340,9 +341,13 @@ def _resolve_api_key(supplied: str | None, model: str = "") -> str:
         return key
 
     key = (supplied or "").strip() or os.environ.get("GEMINI_API_KEY", "").strip()
-    if not key and os.environ.get("GEMINI_API_KEYS_JSON", "").strip():
-        parse_gemini_keys_json(os.environ["GEMINI_API_KEYS_JSON"])
-        return ""
+    pool_raw = os.environ.get("GEMINI_API_KEYS_JSON", "").strip()
+    if not key and pool_raw and pool_raw != "[]":
+        try:
+            parse_gemini_keys_json(pool_raw)
+            return ""
+        except GeminiAuthenticationError:
+            pass
     if not key:
         raise HTTPException(
             status_code=400,
