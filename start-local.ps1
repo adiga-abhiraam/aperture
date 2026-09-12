@@ -10,9 +10,16 @@ $ErrorActionPreference = "Stop"
 $Root = $PSScriptRoot
 $Backend = Join-Path $Root "aperture-backend"
 $Python = Join-Path $Root ".venv\Scripts\python.exe"
-$Frontend = Join-Path $Root "aperture-frontend"
+$Frontend = Join-Path (Join-Path $Root "aperture-frontend") "video_search_frontend"
 $ModelCache = Join-Path $Root ".model-cache"
 $UploadTemp = Join-Path $Root ".tmp\uploads"
+$EnvFile = Join-Path $Root ".env"
+
+if (Test-Path -LiteralPath $EnvFile) {
+    Get-Content -LiteralPath $EnvFile | Where-Object { $_ -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$' } | ForEach-Object {
+        [Environment]::SetEnvironmentVariable($matches[1], $matches[2].Trim(), "Process")
+    }
+}
 
 function Test-LocalUrl {
     param([Parameter(Mandatory)][string]$Url)
@@ -155,23 +162,15 @@ if ((Test-LocalPort 8000) -and -not (Test-LocalUrl "http://127.0.0.1:8000/api/ru
 }
 
 if (-not (Test-LocalUrl "http://127.0.0.1:8000/api/runtime/profiles")) {
-    $EscapedRoot = $Root.Replace("'", "''")
-    $EscapedPython = $Python.Replace("'", "''")
-    $EscapedModelCache = $ModelCache.Replace("'", "''")
-    $EscapedUploadTemp = $UploadTemp.Replace("'", "''")
-    $BackendScript = @"
-Set-Location -LiteralPath '$EscapedRoot\aperture-backend'
-New-Item -ItemType Directory -Force -Path '$EscapedUploadTemp' | Out-Null
-`$env:HF_HOME = '$EscapedModelCache'
-`$env:TEMP = '$EscapedUploadTemp'
-`$env:TMP = '$EscapedUploadTemp'
-`$env:OPENBLAS_NUM_THREADS = '1'
-`$env:OMP_NUM_THREADS = '1'
-`$env:PYTHONPATH = ''
-`$env:QUERY_LOW_MEMORY_MODE = '1'
-& '$EscapedPython' -m uvicorn processing_indexing.debug_api:app --host 127.0.0.1 --port 8000
-"@
-    Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", (ConvertTo-EncodedPowerShell $BackendScript)) -WindowStyle Hidden
+    New-Item -ItemType Directory -Force -Path $UploadTemp | Out-Null
+    $env:HF_HOME = $ModelCache
+    $env:TEMP = $UploadTemp
+    $env:TMP = $UploadTemp
+    $env:OPENBLAS_NUM_THREADS = '1'
+    $env:OMP_NUM_THREADS = '1'
+    $env:PYTHONPATH = $Backend
+    $env:QUERY_LOW_MEMORY_MODE = '1'
+    Start-Process -FilePath $Python -ArgumentList @("-m", "uvicorn", "processing_indexing.debug_api:app", "--host", "127.0.0.1", "--port", "8000") -WorkingDirectory $Backend -WindowStyle Hidden
     Write-Host "Started the processing API."
 }
 else {
@@ -183,18 +182,8 @@ if ($Restart -and (Test-LocalPort 3000)) {
 }
 
 if (-not (Test-LocalUrl "http://127.0.0.1:3000")) {
-    $Npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
-    if (-not $Npm) {
-        throw "Node.js and npm are required. Install Node.js, then run .\start-local.ps1 again."
-    }
-    $EscapedFrontend = $Frontend.Replace("'", "''")
-    $EscapedNpm = $Npm.Source.Replace("'", "''")
-    $FrontendScript = @"
-Set-Location -LiteralPath '$EscapedFrontend'
-`$env:NEXT_PUBLIC_API_URL = 'http://127.0.0.1:8000'
-& '$EscapedNpm' run dev -- -p 3000
-"@
-    Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", (ConvertTo-EncodedPowerShell $FrontendScript)) -WindowStyle Hidden
+    $env:VITE_SEARCH_API_URL = 'http://127.0.0.1:8000'
+    Start-Process -FilePath "cmd.exe" -ArgumentList @("/c", "npm", "run", "dev", "--", "--host", "127.0.0.1", "--port", "3000", "--strictPort") -WorkingDirectory $Frontend -WindowStyle Hidden
     Write-Host "Started the browser UI."
 }
 else {
@@ -202,7 +191,7 @@ else {
 }
 
 Write-Host ""
-Write-Host "Open http://127.0.0.1:3000"
+Write-Host "Open http://127.0.0.1:3000/library  (public demo at http://127.0.0.1:3000)"
 if ($ApiOnly) {
     Write-Host "If this is the first run, wait briefly for the API and browser UI to finish starting."
 }

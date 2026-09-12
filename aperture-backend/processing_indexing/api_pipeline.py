@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -66,6 +67,10 @@ class MediaPreparationError(RuntimeError):
 
 class ApiPipelineError(RuntimeError):
     """An API indexing orchestration failure safe for job diagnostics."""
+
+
+class ApiPipelineCancelled(ApiPipelineError):
+    """Raised when the caller's ``should_cancel`` hook asked the run to stop."""
 
 
 @dataclass(frozen=True)
@@ -118,10 +123,20 @@ class ApiPipelineSettings:
     caption_max_selected_ratio: float = 0.40
     caption_context_neighbours: int = 1
     profile: ApiEmbeddingProfileContract = DEFAULT_API_GEMINI_PROFILE
+    # Hosted calls are network-bound, so windows, captions, and transcript
+    # chunks are processed concurrently.  ``1`` restores strictly serial runs.
+    embed_concurrency: int = 4
+    caption_concurrency: int = 3
+    transcription_concurrency: int = 3
+    # Caption every window instead of only scene changes.  Costs one hosted
+    # call per window but gives the chat a real description of each moment.
+    caption_all_windows: bool = False
 
     def __post_init__(self) -> None:
         if self.window_seconds <= 0 or self.stride_seconds <= 0:
             raise ValueError("window_seconds and stride_seconds must be positive")
+        if min(self.embed_concurrency, self.caption_concurrency, self.transcription_concurrency) < 1:
+            raise ValueError("concurrency values must be at least one")
         if self.stride_seconds > self.window_seconds:
             raise ValueError("stride_seconds cannot exceed window_seconds")
         if self.transcription_chunk_seconds <= 0:
@@ -199,6 +214,8 @@ class ApiIndexingReport:
     errors: Mapping[str, str]
     records: tuple[ApiWindowRecord, ...]
     provider_calls: Mapping[str, int]
+    # Wall-clock seconds per stage, so the UI can say where the time went.
+    stage_seconds: Mapping[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -454,10 +471,17 @@ class FfmpegMediaPreparer:
         *,
         ffmpeg_binary: str = "ffmpeg",
         runner: Callable[..., Any] = subprocess.run,
+        clip_max_height: int = 360,
+        clip_fps: int = 6,
     ) -> None:
         self.work_root = Path(work_root or tempfile.gettempdir()).expanduser().resolve()
         self.ffmpeg_binary = ffmpeg_binary
         self._runner = runner
+        # Embedding and caption models sample clips at about one frame per
+        # second, so a full-resolution x264 encode per window is wasted time
+        # and upload bytes.  ``0`` keeps the source size / frame rate.
+        self.clip_max_height = max(0, int(clip_max_height))
+        self.clip_fps = max(0, int(clip_fps))
 
     def begin(self, source_path: Path, *, video_id: str, has_audio: bool) -> _FfmpegMediaSession:
         source = Path(source_path).expanduser().resolve()
@@ -475,6 +499,8 @@ class FfmpegMediaPreparer:
             work_root=self.work_root,
             ffmpeg_binary=self.ffmpeg_binary,
             runner=self._runner,
+            clip_max_height=self.clip_max_height,
+            clip_fps=self.clip_fps,
         )
 
 
@@ -488,6 +514,8 @@ class _FfmpegMediaSession:
         work_root: Path,
         ffmpeg_binary: str,
         runner: Callable[..., Any],
+        clip_max_height: int = 0,
+        clip_fps: int = 0,
     ) -> None:
         self.source_path = source_path
         self.has_audio = has_audio
@@ -495,10 +523,18 @@ class _FfmpegMediaSession:
         self.work_root = work_root
         self.ffmpeg_binary = ffmpeg_binary
         self._runner = runner
+        self.clip_max_height = clip_max_height
+        self.clip_fps = clip_fps
         self._closed = False
 
     def prepare_video_window(self, window: VideoWindow) -> GeminiMediaClip:
         output = self.work_dir / f"window-{window.index:05d}.mp4"
+        filters: list[str] = []
+        if self.clip_max_height:
+            # Never upscale; keep even dimensions for yuv420p.
+            filters.append(f"scale=-2:'min({self.clip_max_height},ih)'")
+        if self.clip_fps:
+            filters.append(f"fps={self.clip_fps}")
         self._ffmpeg(
             [
                 "-ss",
@@ -510,8 +546,13 @@ class _FfmpegMediaSession:
                 "-map",
                 "0:v:0",
                 "-an",
+                *(["-vf", ",".join(filters)] if filters else []),
                 "-c:v",
                 "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "28",
                 "-pix_fmt",
                 "yuv420p",
                 "-movflags",
@@ -667,6 +708,7 @@ class ApiGeminiProcessingPipeline:
         settings: ApiPipelineSettings | None = None,
         progress_callback: Callable[[ApiPipelineEvent], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> None:
         self.media_preparer = media_preparer
         self.embeddings = embeddings
@@ -676,6 +718,9 @@ class ApiGeminiProcessingPipeline:
         self.settings = settings or ApiPipelineSettings()
         self.progress_callback = progress_callback
         self.clock = clock
+        # Polled between hosted calls so "Stop" takes effect within one call
+        # rather than after the whole video.
+        self.should_cancel = should_cancel
 
         if embeddings.profile.model != self.settings.profile.embedding_model:
             raise ValueError("embedding adapter model must match API profile")
@@ -726,7 +771,9 @@ class ApiGeminiProcessingPipeline:
         session = self.media_preparer.begin(path, video_id=resolved_video_id, has_audio=has_audio)
         errors: dict[str, str] = {}
         diagnostics: list[GeminiCallDiagnostics] = []
+        stage_seconds: dict[str, float] = {}
         try:
+            stage_started = self.clock()
             transcript_result = self._transcribe(
                 session,
                 duration_seconds=duration_seconds,
@@ -734,6 +781,10 @@ class ApiGeminiProcessingPipeline:
                 total_windows=len(windows),
             )
             diagnostics.extend(transcript_result.diagnostics)
+            stage_seconds["transcription"] = self.clock() - stage_started
+            self._check_cancelled()
+
+            stage_started = self.clock()
             prepared = self._embed_windows(
                 session,
                 path=path,
@@ -742,6 +793,10 @@ class ApiGeminiProcessingPipeline:
                 has_audio=has_audio,
                 errors=errors,
             )
+            stage_seconds["embedding_windows"] = self.clock() - stage_started
+            self._check_cancelled()
+
+            stage_started = self.clock()
             caption_results, selected = self._caption_selected_windows(
                 prepared,
                 total_windows=len(windows),
@@ -750,6 +805,10 @@ class ApiGeminiProcessingPipeline:
             diagnostics.extend(
                 result.diagnostics for result in caption_results.values()
             )
+            stage_seconds["captioning_windows"] = self.clock() - stage_started
+            self._check_cancelled()
+
+            stage_started = self.clock()
             records, direct, inherited = self._build_records(
                 prepared,
                 caption_results=caption_results,
@@ -757,6 +816,9 @@ class ApiGeminiProcessingPipeline:
                 source_path=path,
                 errors=errors,
             )
+            stage_seconds["building_payloads"] = self.clock() - stage_started
+            self._check_cancelled()
+
             if self.record_sink is not None and records:
                 self._emit(
                     "qdrant_upsert",
@@ -767,7 +829,9 @@ class ApiGeminiProcessingPipeline:
                     total_windows=len(windows),
                     details={"collection": self.settings.profile.collection_name},
                 )
+                stage_started = self.clock()
                 self.record_sink(records, self.settings.profile)
+                stage_seconds["qdrant_upsert"] = self.clock() - stage_started
             self._emit(
                 "complete",
                 "complete",
@@ -775,7 +839,11 @@ class ApiGeminiProcessingPipeline:
                 "API indexing completed",
                 current_window=len(records),
                 total_windows=len(windows),
-                details={"records": len(records), "failed_windows": len(errors)},
+                details={
+                    "records": len(records),
+                    "failed_windows": len(errors),
+                    "stage_seconds": {k: round(v, 2) for k, v in stage_seconds.items()},
+                },
             )
             return ApiIndexingReport(
                 video_id=resolved_video_id,
@@ -792,7 +860,17 @@ class ApiGeminiProcessingPipeline:
                 errors=dict(errors),
                 records=tuple(records),
                 provider_calls=_call_counts(diagnostics),
+                stage_seconds=stage_seconds,
             )
+        except ApiPipelineCancelled:
+            self._emit(
+                "cancelled",
+                "cancelled",
+                1.0,
+                "API indexing stopped at the user's request",
+                total_windows=len(windows),
+            )
+            raise
         except Exception as exc:
             self._emit(
                 "failed",
@@ -805,6 +883,18 @@ class ApiGeminiProcessingPipeline:
             raise
         finally:
             session.cleanup()
+
+    def _cancelled(self) -> bool:
+        if self.should_cancel is None:
+            return False
+        try:
+            return bool(self.should_cancel())
+        except Exception:  # noqa: BLE001 - a broken hook must not abort a paid run
+            return False
+
+    def _check_cancelled(self) -> None:
+        if self._cancelled():
+            raise ApiPipelineCancelled("processing was cancelled")
 
     def _transcribe(
         self,
@@ -845,7 +935,16 @@ class ApiGeminiProcessingPipeline:
                 details={"audio_chunks_complete": current, "audio_chunks_total": total},
             )
 
-        return self.transcriber.transcribe_chunks(chunks, progress_callback=progress)
+        try:
+            return self.transcriber.transcribe_chunks(
+                chunks,
+                progress_callback=progress,
+                concurrency=self.settings.transcription_concurrency,
+                should_cancel=self._cancelled,
+            )
+        except TypeError:
+            # Custom transcribers in tests may implement the older signature.
+            return self.transcriber.transcribe_chunks(chunks, progress_callback=progress)
 
     def _embed_windows(
         self,
@@ -857,72 +956,96 @@ class ApiGeminiProcessingPipeline:
         has_audio: bool,
         errors: dict[str, str],
     ) -> list[_PreparedWindow]:
-        prepared: list[_PreparedWindow] = []
         total = len(windows)
-        for current, window in enumerate(windows, start=1):
-            self._emit(
-                "embedding_windows",
-                "running",
-                0.30 + 0.32 * (current - 1) / max(total, 1),
-                f"Generating independent Gemini embeddings for window {current}/{total}",
-                current_window=current - 1,
-                total_windows=total,
+        segments = list(transcript_segments)
+        self._emit(
+            "embedding_windows",
+            "running",
+            0.30,
+            f"Generating independent Gemini embeddings for {total} windows "
+            f"({self.settings.embed_concurrency} in flight)",
+            current_window=0,
+            total_windows=total,
+        )
+
+        def embed_one(window: VideoWindow) -> _PreparedWindow | None:
+            # A cancelled job skips the windows it has not started; windows
+            # already mid-call finish so partial results stay consistent.
+            if self._cancelled():
+                return None
+            visual_clip = session.prepare_video_window(window)
+            video_input = normalize_video_input(
+                visual_clip.path,
+                duration_seconds=visual_clip.duration_seconds,
+                mime_type=visual_clip.mime_type,
+                profile=self.embeddings.profile,
             )
-            try:
-                visual_clip = session.prepare_video_window(window)
-                video_input = normalize_video_input(
-                    visual_clip.path,
-                    duration_seconds=visual_clip.duration_seconds,
-                    mime_type=visual_clip.mime_type,
+            audio_clip = session.prepare_audio_window(window) if has_audio else None
+            audio_input = (
+                normalize_audio_input(
+                    audio_clip.path,
+                    duration_seconds=audio_clip.duration_seconds,
+                    mime_type=audio_clip.mime_type,
                     profile=self.embeddings.profile,
                 )
-                audio_clip = session.prepare_audio_window(window) if has_audio else None
-                audio_input = (
-                    normalize_audio_input(
-                        audio_clip.path,
-                        duration_seconds=audio_clip.duration_seconds,
-                        mime_type=audio_clip.mime_type,
-                        profile=self.embeddings.profile,
+                if audio_clip is not None
+                else None
+            )
+            transcript = transcript_for_window(segments, window.start, window.end)
+            transcript_input = (
+                normalize_transcript_input(transcript) if transcript.strip() else None
+            )
+            vectors = self.embeddings.embed_window(
+                video=video_input,
+                audio=audio_input,
+                transcript=transcript_input,
+            )
+            return _PreparedWindow(
+                window=window,
+                visual_clip=visual_clip,
+                audio_clip=audio_clip,
+                transcript=transcript,
+                visual=list(vectors.visual),
+                audio=list(vectors.audio) if vectors.audio is not None else None,
+                transcript_vector=(
+                    list(vectors.transcript) if vectors.transcript is not None else None
+                ),
+            )
+
+        results: dict[int, _PreparedWindow] = {}
+        completed = 0
+        with ThreadPoolExecutor(max_workers=self.settings.embed_concurrency) as pool:
+            futures = {pool.submit(embed_one, window): window for window in windows}
+            # Futures are consumed in submission order so progress reads as
+            # "window N/total" even though calls overlap.
+            for future, window in futures.items():
+                try:
+                    item = future.result()
+                except Exception as exc:  # noqa: BLE001 - one window must not end the job
+                    errors[window.window_id] = redact_text(exc)
+                    completed += 1
+                    self._emit(
+                        "embedding_windows",
+                        "warning",
+                        0.30 + 0.32 * completed / max(total, 1),
+                        f"Window {window.index + 1}/{total} could not be embedded",
+                        current_window=completed,
+                        total_windows=total,
+                        details={"window_id": window.window_id, "error": redact_text(exc)},
                     )
-                    if audio_clip is not None
-                    else None
-                )
-                transcript = transcript_for_window(list(transcript_segments), window.start, window.end)
-                transcript_input = (
-                    normalize_transcript_input(transcript) if transcript.strip() else None
-                )
-                vectors = self.embeddings.embed_window(
-                    video=video_input,
-                    audio=audio_input,
-                    transcript=transcript_input,
-                )
-                prepared.append(
-                    _PreparedWindow(
-                        window=window,
-                        visual_clip=visual_clip,
-                        audio_clip=audio_clip,
-                        transcript=transcript,
-                        visual=list(vectors.visual),
-                        audio=list(vectors.audio) if vectors.audio is not None else None,
-                        transcript_vector=(
-                            list(vectors.transcript)
-                            if vectors.transcript is not None
-                            else None
-                        ),
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001 - one window must not end the job
-                errors[window.window_id] = redact_text(exc)
+                    continue
+                completed += 1
+                if item is not None:
+                    results[window.index] = item
                 self._emit(
                     "embedding_windows",
-                    "warning",
-                    0.30 + 0.32 * current / max(total, 1),
-                    f"Window {current}/{total} could not be embedded",
-                    current_window=current - 1,
+                    "running",
+                    0.30 + 0.32 * completed / max(total, 1),
+                    f"Embedded window {completed}/{total}",
+                    current_window=completed,
                     total_windows=total,
-                    details={"window_id": window.window_id, "error": redact_text(exc)},
                 )
-        return prepared
+        return [results[index] for index in sorted(results)]
 
     def _caption_selected_windows(
         self,
@@ -933,28 +1056,50 @@ class ApiGeminiProcessingPipeline:
     ) -> tuple[dict[int, GeminiCaptionResult], set[int]]:
         selected = _select_caption_indexes(prepared, self.settings)
         results: dict[int, GeminiCaptionResult] = {}
-        for current, index in enumerate(sorted(selected), start=1):
+        ordered = sorted(selected)
+        self._emit(
+            "captioning_windows",
+            "running",
+            0.64,
+            f"Generating Gemini captions for {len(ordered)} selected windows "
+            f"({self.settings.caption_concurrency} in flight)",
+            current_window=0,
+            total_windows=total_windows,
+        )
+
+        def caption_one(index: int) -> GeminiCaptionResult | None:
+            if self._cancelled():
+                return None
             item = prepared[index]
-            self._emit(
-                "captioning_windows",
-                "running",
-                0.64 + 0.18 * (current - 1) / max(len(selected), 1),
-                f"Generating Gemini caption for selected window {current}/{len(selected)}",
-                current_window=item.window.index,
-                total_windows=total_windows,
-            )
-            try:
-                results[index] = self.captioner.caption_window(item.visual_clip, item.window)
-            except Exception as exc:  # noqa: BLE001 - caption failure is recoverable
-                errors[f"{item.window.window_id}:caption"] = redact_text(exc)
+            return self.captioner.caption_window(item.visual_clip, item.window)
+
+        with ThreadPoolExecutor(max_workers=self.settings.caption_concurrency) as pool:
+            futures = [(index, pool.submit(caption_one, index)) for index in ordered]
+            for current, (index, future) in enumerate(futures, start=1):
+                item = prepared[index]
+                try:
+                    result = future.result()
+                except Exception as exc:  # noqa: BLE001 - caption failure is recoverable
+                    errors[f"{item.window.window_id}:caption"] = redact_text(exc)
+                    self._emit(
+                        "captioning_windows",
+                        "warning",
+                        0.64 + 0.18 * current / max(len(ordered), 1),
+                        "Selected caption call failed; visual/audio retrieval remains available",
+                        current_window=item.window.index,
+                        total_windows=total_windows,
+                        details={"window_id": item.window.window_id, "error": redact_text(exc)},
+                    )
+                    continue
+                if result is not None:
+                    results[index] = result
                 self._emit(
                     "captioning_windows",
-                    "warning",
-                    0.64 + 0.18 * current / max(len(selected), 1),
-                    "Selected caption call failed; visual/audio retrieval remains available",
+                    "running",
+                    0.64 + 0.18 * current / max(len(ordered), 1),
+                    f"Captioned selected window {current}/{len(ordered)}",
                     current_window=item.window.index,
                     total_windows=total_windows,
-                    details={"window_id": item.window.window_id, "error": redact_text(exc)},
                 )
         return results, selected
 
@@ -970,6 +1115,33 @@ class ApiGeminiProcessingPipeline:
         records: list[ApiWindowRecord] = []
         direct = 0
         inherited = 0
+
+        # Inherited windows reuse their neighbour's caption text verbatim, so
+        # each distinct caption is embedded once and shared.
+        unique_captions: dict[str, list[float] | Exception] = {}
+        caption_texts = {
+            result.caption for result in caption_results.values() if result.caption
+        }
+        if caption_texts:
+            self._emit(
+                "building_payloads",
+                "running",
+                0.84,
+                f"Embedding {len(caption_texts)} distinct captions",
+                total_windows=len(prepared),
+            )
+
+            def embed_caption(text: str) -> list[float]:
+                return self.embeddings.embed_caption(normalize_transcript_input(text))
+
+            with ThreadPoolExecutor(max_workers=self.settings.embed_concurrency) as pool:
+                futures = {text: pool.submit(embed_caption, text) for text in sorted(caption_texts)}
+                for text, future in futures.items():
+                    try:
+                        unique_captions[text] = list(future.result())
+                    except Exception as exc:  # noqa: BLE001 - retain other modalities
+                        unique_captions[text] = exc
+
         for index, item in enumerate(prepared):
             caption_result = caption_results.get(index)
             caption = ""
@@ -977,11 +1149,13 @@ class ApiGeminiProcessingPipeline:
             caption_direct = False
             caption_inherited = False
             confidence = 0.0
+            evidence: list[str] = []
             if caption_result is not None:
                 caption = caption_result.caption
                 caption_source_index = index
                 caption_direct = True
                 confidence = caption_result.confidence
+                evidence = list(caption_result.evidence)
                 direct += 1
             else:
                 inherited_result = _nearby_caption(
@@ -993,6 +1167,7 @@ class ApiGeminiProcessingPipeline:
                     caption_source_index, source = inherited_result
                     caption = source.caption
                     confidence = source.confidence
+                    evidence = list(source.evidence)
                     caption_inherited = True
                     inherited += 1
 
@@ -1002,13 +1177,18 @@ class ApiGeminiProcessingPipeline:
             if item.transcript_vector is not None:
                 vectors["transcript"] = item.transcript_vector
             if caption:
-                try:
-                    caption_vector = self.embeddings.embed_caption(
-                        normalize_transcript_input(caption)
-                    )
-                    vectors["caption"] = caption_vector
-                except Exception as exc:  # noqa: BLE001 - retain other modalities
-                    errors[f"{item.window.window_id}:caption_embedding"] = redact_text(exc)
+                cached = unique_captions.get(caption)
+                if isinstance(cached, Exception):
+                    errors[f"{item.window.window_id}:caption_embedding"] = redact_text(cached)
+                elif cached is not None:
+                    vectors["caption"] = list(cached)
+                else:
+                    try:
+                        vectors["caption"] = self.embeddings.embed_caption(
+                            normalize_transcript_input(caption)
+                        )
+                    except Exception as exc:  # noqa: BLE001 - retain other modalities
+                        errors[f"{item.window.window_id}:caption_embedding"] = redact_text(exc)
 
             payload: dict[str, Any] = {
                 "video_id": item.window.video_id,
@@ -1018,6 +1198,7 @@ class ApiGeminiProcessingPipeline:
                 "end": item.window.end,
                 "transcript": item.transcript,
                 "caption": caption,
+                "caption_evidence": evidence,
                 "has_audio": item.audio is not None,
                 "caption_direct": caption_direct,
                 "caption_inherited": caption_inherited,
@@ -1185,6 +1366,8 @@ def _select_caption_indexes(
 ) -> set[int]:
     if not prepared:
         return set()
+    if settings.caption_all_windows:
+        return set(range(len(prepared)))
     candidates: list[tuple[int, float]] = [(0, 2.0)]
     last_selected = 0
     for index in range(1, len(prepared)):

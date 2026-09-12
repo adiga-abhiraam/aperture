@@ -92,13 +92,8 @@ def sanitize(value):
 
 
 def safe_filename(name: str) -> str:
-    name_str = str(name).replace("\\", "/")
-    if name_str.lower().startswith("c:/fakepath/"):
-        name_str = name_str[12:]
-    elif name_str.lower().startswith("fakepath/"):
-        name_str = name_str[9:]
-    clean = Path(name_str).name
-    if clean != name_str or Path(clean).suffix.lower() not in VIDEO_EXTENSIONS:
+    clean = Path(name).name
+    if clean != name or Path(clean).suffix.lower() not in VIDEO_EXTENSIONS:
         raise ValueError("Unsafe or unsupported video filename")
     return clean
 
@@ -164,9 +159,19 @@ class Job:
                 "metadata": self.metadata,
                 "total_windows": self.total_windows or len(self.windows),
                 "indexed_windows": self.report.get("successfully_indexed_windows", 0),
+                "processing_seconds": self.processing_seconds,
+                "stage_durations": self.report.get("stage_durations") or {},
                 "errors": self.errors[:3],
             }
         )
+
+    @property
+    def processing_seconds(self) -> float | None:
+        """Wall-clock seconds of the last run; live while running, fixed afterwards."""
+        if self.started_at is None:
+            return None
+        end = self.finished_at if self.finished_at is not None else time.time()
+        return round(max(0.0, end - self.started_at), 3)
 
     def persisted_state(self) -> dict:
         """The part of a job that must survive a process restart (see restore)."""
@@ -244,7 +249,13 @@ class JobManager:
         # injected to avoid a debug_api import cycle.
         self._runtime_config_resolver = runtime_config_resolver
 
-    def create(self, filename: str, data: bytes, config: dict) -> Job:
+    def set_runtime_config_resolver(self, resolver: Callable[[str], dict] | None) -> None:
+        """Swap the session lookup (e.g. for one that falls back to env keys)."""
+        self._runtime_config_resolver = resolver
+
+    def create(
+        self, filename: str, data: bytes, config: dict, *, upload_seconds: float | None = None
+    ) -> Job:
         name = safe_filename(filename)
         job_id = uuid.uuid4().hex
         directory = self.root / job_id
@@ -257,6 +268,9 @@ class JobManager:
         video_id = stable_video_id(path)
         metadata["video_id"] = video_id
         metadata["filename"] = name
+        metadata["size_bytes"] = len(data)
+        if upload_seconds is not None:
+            metadata["upload_seconds"] = round(max(0.0, float(upload_seconds)), 3)
         job = Job(
             job_id,
             directory,
@@ -591,7 +605,15 @@ class JobManager:
         # The session config wins for cloud endpoint, provider choices, and
         # collection contract.  User-tunable non-secret settings stay in the
         # job-local mapping.
-        job.private_config = {**job.private_config, **runtime}
+        # ``runtime_config()`` falls back to the persisted public config, so a
+        # job restored after a restart keeps the window settings it was
+        # uploaded with.
+        local = dict(job.runtime_config())
+        runtime = dict(runtime)
+        for name in ("window_seconds", "stride_seconds", "max_windows", "index_qdrant"):
+            if name in local:
+                runtime.pop(name, None)
+        job.private_config = {**local, **runtime}
         self._activity(
             job,
             "runtime",
@@ -776,7 +798,9 @@ class JobManager:
         """
 
         from .api_pipeline import (
+            ApiPipelineCancelled,
             ApiPipelineSettings,
+            FfmpegMediaPreparer,
             GeminiApiPipelineFactoryConfig,
             api_contract_from_runtime_profile,
             build_gemini_api_pipeline,
@@ -873,6 +897,12 @@ class JobManager:
             vector_store_target=vector_store_target,
             persistent=bool(sink),
         )
+        def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+            try:
+                return max(minimum, int(os.environ.get(name, "") or default))
+            except ValueError:
+                return default
+
         bundle = build_gemini_api_pipeline(
             GeminiApiPipelineFactoryConfig(
                 gemini_api_key=gemini_key,
@@ -883,13 +913,24 @@ class JobManager:
                 collection_name=contract.collection_name,
             ),
             record_sink=sink,
+            media_preparer=FfmpegMediaPreparer(
+                clip_max_height=_env_int("API_CLIP_MAX_HEIGHT", 360, minimum=0),
+                clip_fps=_env_int("API_CLIP_FPS", 6, minimum=0),
+            ),
             progress_callback=pipeline_progress,
             settings=ApiPipelineSettings(
                 window_seconds=settings.window_seconds,
                 stride_seconds=settings.stride_seconds,
                 profile=contract,
+                embed_concurrency=_env_int("API_EMBED_CONCURRENCY", 6),
+                caption_concurrency=_env_int("API_CAPTION_CONCURRENCY", 6),
+                transcription_concurrency=_env_int("API_TRANSCRIPTION_CONCURRENCY", 3),
+                caption_all_windows=os.environ.get("API_CAPTION_ALL_WINDOWS", "1").lower()
+                not in ("0", "false", "no"),
             ),
         )
+        # "Stop" is honoured between hosted calls instead of after the video.
+        bundle.pipeline.should_cancel = lambda: job.cancel_requested
         caption_provider = str(providers.get("caption") or "gemini")
         if caption_provider in {"openai", "cosmos"}:
             # Reuse the existing hosted VLM implementations only for the
@@ -943,12 +984,16 @@ class JobManager:
                 provider=caption_provider,
                 model=caption_model,
             )
-        report = bundle.pipeline.process_video(
-            job.video_path,
-            video_id=str(job.metadata.get("video_id") or "") or None,
-            duration_seconds=float(job.metadata.get("duration") or 0) or None,
-            has_audio=bool(job.metadata.get("has_audio")),
-        )
+        try:
+            report = bundle.pipeline.process_video(
+                job.video_path,
+                video_id=str(job.metadata.get("video_id") or "") or None,
+                duration_seconds=float(job.metadata.get("duration") or 0) or None,
+                has_audio=bool(job.metadata.get("has_audio")),
+            )
+        except ApiPipelineCancelled:
+            job.report = {**job.report, "status": "cancelled"}
+            return
         self._model_state(
             job,
             "gemini_api",
@@ -976,6 +1021,7 @@ class JobManager:
                     "selection_reasons": ["embedding_change"] if payload.get("caption_selected") else [],
                     "vlm_call_state": "direct" if payload.get("caption_direct") else "inherited" if caption else "unavailable",
                     "caption": caption,
+                    "caption_evidence": list(payload.get("caption_evidence") or []),
                     "has_audio": bool(payload.get("has_audio")),
                     "provenance": "direct" if payload.get("caption_direct") else "inherited" if payload.get("caption_inherited") else "unavailable",
                     "confidence": float(payload.get("caption_confidence") or 0),
@@ -983,7 +1029,6 @@ class JobManager:
                     "point_id": None,
                     "stored_payload": {key: value for key, value in payload.items() if key != "source_path"},
                     "vectors": {name: _vector_summary(values) for name, values in vectors.items()},
-                    "raw_vectors": {name: list(values) for name, values in vectors.items() if isinstance(values, (list, tuple))},
                     "openai": None,
                     "cosmos": None,
                     "errors": [error for key, error in report.errors.items() if key.startswith(window_id)],
@@ -1006,6 +1051,7 @@ class JobManager:
             "inherited_captions": report.inherited_caption_windows,
             "transcript_segments": report.transcript_segments,
             "elapsed_seconds": report.elapsed_seconds,
+            "stage_durations": {k: round(float(v), 3) for k, v in dict(report.stage_seconds).items()},
             "provider_calls": dict(report.provider_calls),
             "qdrant_inserted": report.indexed_windows if sink else 0,
             "errors": dict(report.errors),
@@ -1176,7 +1222,6 @@ class JobManager:
             def __init__(self, debug_store, index_store):
                 self.debug_store = debug_store
                 self.index_store = index_store
-                self.qdrant_disabled = False
 
             def ensure_collection(self):
                 check()
@@ -1186,28 +1231,29 @@ class JobManager:
                     "Checking Qdrant collection schema",
                     collection=settings.collection_name,
                 )
+                if self.index_store is None:
+                    return
                 try:
                     self.index_store.ensure_collection()
-                except Exception as exc:
-                    self.qdrant_disabled = True
                     manager._activity(
                         job,
                         "qdrant",
-                        "Qdrant collection setup unavailable; results will remain stored in local job memory",
+                        "Qdrant collection is ready",
+                        collection=settings.collection_name,
+                    )
+                except Exception as exc:
+                    manager._activity(
+                        job,
+                        "qdrant",
+                        "Qdrant vector database is offline (port 6333 unreachable). Continuing in local memory mode.",
                         level="warning",
                         error_type=type(exc).__name__,
                         error=manager._safe_message(job, exc),
                     )
-                    return
-                manager._activity(
-                    job,
-                    "qdrant",
-                    "Qdrant collection is ready",
-                    collection=settings.collection_name,
-                )
+                    self.index_store = None
 
             def existing_window_ids(self, video_id):
-                if self.qdrant_disabled:
+                if self.index_store is None:
                     return set()
                 try:
                     return self.index_store.existing_window_ids(video_id)
@@ -1216,29 +1262,28 @@ class JobManager:
 
             def upsert(self, items):
                 check()
-                self.debug_store.upsert(items)
-                if self.qdrant_disabled:
-                    return
                 manager._activity(
                     job,
                     "qdrant",
-                    "Writing a batch of searchable windows to Qdrant",
+                    "Writing a batch of searchable windows",
                     records=len(items),
                     first_window_id=items[0][0].window_id if items else None,
                 )
-                try:
-                    self.index_store.upsert(items)
-                except Exception as exc:
-                    self.qdrant_disabled = True
-                    manager._activity(
-                        job,
-                        "qdrant",
-                        "Qdrant batch write failed; continuing with local job memory",
-                        level="warning",
-                        records=len(items),
-                        error_type=type(exc).__name__,
-                        error=manager._safe_message(job, exc),
-                    )
+                self.debug_store.upsert(items)
+                if self.index_store is not None:
+                    try:
+                        self.index_store.upsert(items)
+                    except Exception as exc:
+                        manager._activity(
+                            job,
+                            "qdrant",
+                            "Qdrant batch write failed. Saved to local memory storage.",
+                            level="warning",
+                            records=len(items),
+                            error_type=type(exc).__name__,
+                            error=manager._safe_message(job, exc),
+                        )
+                        self.index_store = None
 
         class DebugVLM:
             def describe(self, path, window):
@@ -1735,4 +1780,7 @@ def _vector_summary(vector):
         "min": min(vector),
         "max": max(vector),
         "finite": all(math.isfinite(x) for x in vector),
+        # The first few components so the watch page can show a glimpse of the
+        # real embedding without shipping the whole vector to the browser.
+        "preview": [round(float(x), 3) for x in list(vector)[:6]],
     }

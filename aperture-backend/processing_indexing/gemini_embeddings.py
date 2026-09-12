@@ -14,7 +14,9 @@ an API key.  Tests and callers can inject an ``EmbeddingTransport`` instead.
 from __future__ import annotations
 
 import math
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from numbers import Real
@@ -352,24 +354,31 @@ class GeminiEmbedding2Adapter:
         dimensions = _normalize_dimension_map(
             dimensions_by_modality, default=self.profile.dimensions
         )
-        visual = tuple(self.embed_visual(video, dimensions=dimensions["visual"]))
-        audio_vector = (
-            tuple(self.embed_audio(audio, dimensions=dimensions["audio"]))
-            if audio is not None
-            else None
-        )
-        transcript_vector = (
-            tuple(
-                self.embed_transcript(transcript, dimensions=dimensions["transcript"])
+        # The per-field calls are independent network requests, so they are
+        # issued together; results are still assigned by field, never fused.
+        tasks: dict[str, Callable[[], list[float]]] = {
+            "visual": lambda: self.embed_visual(video, dimensions=dimensions["visual"])
+        }
+        if audio is not None:
+            tasks["audio"] = lambda: self.embed_audio(audio, dimensions=dimensions["audio"])
+        if transcript is not None:
+            tasks["transcript"] = lambda: self.embed_transcript(
+                transcript, dimensions=dimensions["transcript"]
             )
-            if transcript is not None
-            else None
-        )
-        caption_vector = (
-            tuple(self.embed_caption(caption, dimensions=dimensions["caption"]))
-            if caption is not None
-            else None
-        )
+        if caption is not None:
+            tasks["caption"] = lambda: self.embed_caption(caption, dimensions=dimensions["caption"])
+        results: dict[str, tuple[float, ...]] = {}
+        if len(tasks) == 1:
+            results["visual"] = tuple(tasks["visual"]())
+        else:
+            with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+                futures = {name: pool.submit(task) for name, task in tasks.items()}
+                for name, future in futures.items():
+                    results[name] = tuple(future.result())
+        visual = results["visual"]
+        audio_vector = results.get("audio")
+        transcript_vector = results.get("transcript")
+        caption_vector = results.get("caption")
         return GeminiWindowEmbeddings(
             visual=visual,
             audio=audio_vector,
@@ -422,6 +431,8 @@ class GoogleGenAIEmbeddingClient:
         self._sdk_loader = sdk_loader or _load_google_sdk
         self.retry_policy = retry_policy or GeminiRetryPolicy()
         self._sleep = sleep
+        # Windows are embedded from several threads; build the client once.
+        self._client_lock = threading.Lock()
 
     def embed(
         self,
@@ -462,14 +473,16 @@ class GoogleGenAIEmbeddingClient:
 
     def _ensure_client_and_types(self) -> tuple[Any, Any]:
         if self._client is None or self._types is None:
-            genai, types = self._sdk_loader()
-            self._types = types
-            if self._client is None:
-                self._client = (
-                    genai.Client(api_key=self._api_key)
-                    if self._api_key is not None
-                    else genai.Client()
-                )
+            with self._client_lock:
+                if self._client is None or self._types is None:
+                    genai, types = self._sdk_loader()
+                    self._types = types
+                    if self._client is None:
+                        self._client = (
+                            genai.Client(api_key=self._api_key)
+                            if self._api_key is not None
+                            else genai.Client()
+                        )
         return self._client, self._types
 
 

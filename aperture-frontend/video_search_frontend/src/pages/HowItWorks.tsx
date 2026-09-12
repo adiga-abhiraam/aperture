@@ -16,7 +16,7 @@ const STAGES = [
   {
     title: 'Extraction',
     body: 'Each window produces four independent signals. They are never averaged or concatenated into one vector, because collapsing them loses the ability to say which modality matched.',
-    detail: 'Visual (X-CLIP) · Audio events (CLAP) · Transcript (Whisper then BGE-M3) · Caption (Qwen2.5-VL or Gemini)',
+    detail: 'Visual (X-CLIP) · Audio events (CLAP) · Transcript (Whisper then BGE-M3) · Caption (Qwen2.5-VL)',
   },
   {
     title: 'Indexing',

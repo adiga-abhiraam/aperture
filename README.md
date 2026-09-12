@@ -1,69 +1,99 @@
 # Aperture — Multimodal Video Search
 
-Search any video archive the way you remember it — by text, voice, images, or reference clips.
+Search any video archive the way you remember it — by text, voice, images, or reference clips — and ask questions about a video with every answer tied to a timestamp.
 
 ## Project Structure
 
 ```
 aperture/
-├── aperture-backend/          # Python FastAPI backend
-│   ├── processing_indexing/   # Video upload, processing, embedding, Qdrant indexing
-│   ├── query_retrieval/       # Multimodal search, fusion, reranking, verification
-│   ├── test_assets/           # Test media and fixtures
-│   ├── requirements*.txt      # Python dependencies
-│   └── conftest.py / pytest.ini
+├── aperture-backend/              # Python FastAPI backend
+│   ├── processing_indexing/       # Upload, processing, embedding, Qdrant indexing, video chat
+│   ├── query_retrieval/           # Multimodal search, fusion, reranking, verification
+│   ├── test_assets/               # Test media and fixtures
+│   └── requirements*.txt
 │
-├── aperture-frontend/         # Next.js app (dashboard, watch page, video-scoped chat)
-│   ├── app/                   # Routes: /login, /dashboard, /videos/[id]
-│   ├── features/              # Feature slices: dashboard, video-review, ai-chat, ...
-│   ├── components/            # Shared shell (AppShell, Navbar, Sidebar) and UI primitives
-│   ├── services/              # API client + adapters (mock kept behind NEXT_PUBLIC_USE_MOCK=1)
-│   ├── video_search_frontend/ # Legacy Vite app (assets only; not run locally)
-│   └── processing_debug_frontend/ # Legacy debug dashboard (not run locally)
+├── aperture-frontend/
+│   └── video_search_frontend/     # Vite + React app (the only UI)
+│       └── src/pages/             # Landing (live search), Dashboard, Watch, Preprocess, …
 │
-├── Dockerfile                 # Single-container deploy (Railway / Cloud Run)
-├── docker-compose.yml         # Local Qdrant
-├── start-local.ps1            # One-command local dev launcher
-└── .env.example               # Required environment variables
+├── processing_jobs/               # Local library: one folder per uploaded video (git-ignored)
+├── Dockerfile                     # Single-container deploy (Railway / Cloud Run)
+├── docker-compose.yml             # Local Qdrant
+├── start-local.ps1                # One-command local dev launcher
+└── .env.example                   # Required environment variables
 ```
 
 ## Quick Start
 
 ```powershell
-# First time setup
-.\start-local.ps1 -Setup
-
-# Subsequent runs
-.\start-local.ps1
+copy .env.example .env            # then fill in GEMINI_API_KEY
+.\start-local.ps1 -Setup          # first time: venv, pip, npm ci
+.\start-local.ps1                 # later runs (add -Restart to replace a stuck API)
 ```
 
-Opens the app at `http://127.0.0.1:3000` and the API at `http://127.0.0.1:8000`.
+Opens the UI at `http://127.0.0.1:3000` and the API at `http://127.0.0.1:8000` (`/docs` for the OpenAPI UI). Qdrant runs in Docker on 6333.
 
-Frontend only: `cd aperture-frontend && npm run dev` (Turbopack; first page ~10 s, later pages under 1 s).
+## Pages
 
-## How the frontend talks to the backend
+| Route | What it does |
+|---|---|
+| `/` | Public demo: live search over a sample or uploaded clip |
+| `/dashboard` | **Library** of every uploaded video: status, upload / processing time, Process · Stop · Delete, filters |
+| `/videos/<job_id>` | **Watch page**: player, transcript, key moments, timing breakdown, and *Ask this video* chat |
+| `/preprocess` | Single-call quick index (stateless demo) |
+
+### Dashboard → Watch → Chat
+
+1. **Add videos** picks an engine per upload:
+   - **Cloud API (Gemini)** — transcription, embeddings and captions via Gemini using the key in `.env`. Fastest on a laptop.
+   - **This computer** — Whisper + X-CLIP + CLAP + BGE-M3 on the local CPU. Nothing leaves the machine.
+   
+   Both engines use 10 s windows. *Fast* tiles the video (18 windows for a 3-minute clip); *Precise* steps every 5 s (twice the calls, finer matches). On the Cloud API every window gets its own scene description.
+2. Cards show live stage + progress while processing, and afterwards the measured **upload time**, **processing time** and indexed window count. **Stop** cancels between model calls; **Delete** removes the file, artifacts, chat history and the video's vectors.
+3. Clicking a card opens the watch page. The chat answers from that video's transcript and per-window scene descriptions; every `[mm:ss]` in an answer seeks the player. If those notes can't answer (e.g. a question about sound), the model watches the footage itself — the reply is tagged *Watched the footage* — and only says *not found in this video* when neither can answer.
+
+## Where data lives (nothing is lost on restart)
+
+| Data | Location |
+|---|---|
+| Upload, `job.json`, exports (`window_debug.jsonl`, transcript, report) | `processing_jobs/<job_id>/` |
+| Chat history | `processing_jobs/<job_id>/chat.json` |
+| Vectors | Qdrant (`qdrant_data` Docker volume, or Qdrant Cloud via `QDRANT_URL`/`QDRANT_API_KEY`) |
+
+Jobs are reloaded from disk when the API starts. A job that was mid-run during a restart is marked failed and can be re-run with **Retry**. Cloud-API jobs re-attach to a backend-owned runtime session built from `.env`, so they can be reprocessed and chatted with after a restart.
+
+## Processing speed
+
+The Cloud-API pipeline runs hosted calls concurrently and reports per-stage timings (shown under *Details* on the watch page). Tune in `.env`:
+
+```
+API_EMBED_CONCURRENCY=6          # windows embedded at once (each window's 3 modality calls also run together)
+API_CAPTION_CONCURRENCY=6
+API_TRANSCRIPTION_CONCURRENCY=3
+API_CAPTION_ALL_WINDOWS=1        # 0 = caption only scene changes (fewer calls, thinner chat context)
+API_CLIP_MAX_HEIGHT=360          # clips are downscaled before upload; 0 = keep source size
+API_CLIP_FPS=6
+```
+
+Clips and audio chunks under 12 MB are sent inline with the request rather than through the Files API (no upload → wait → delete round trip). Reference: the 3-minute demo clip processes in about 90 s with all 19 windows captioned.
+
+Rate-limit (429) responses are retried with backoff up to ~50 s total. If you hit quota often, lower the concurrency or add keys to `GEMINI_API_KEYS_JSON`.
+
+## API surface used by the UI
 
 | UI action | API |
 |---|---|
-| Library grid | `GET /api/processing/jobs` (jobs are restored from `processing_jobs/` on startup) |
-| Card poster | `GET /api/processing/jobs/{id}/thumbnail` (ffmpeg frame, cached) |
-| Upload | `POST /api/processing/jobs` (multipart `video` + `configuration` JSON with `title`, `vlm_mode`) |
-| Process | `POST /api/processing/jobs/{id}/start`, then polled via `GET /api/processing/jobs/{id}` |
-| Player | `GET /api/processing/jobs/{id}/video` (range requests) |
-| Transcript / moments | `GET /api/processing/jobs/{id}/windows` |
-| Chat | `POST /api/query/search` with `video_id` — answers are composed only from matching windows |
-
-Chat needs a processed video and a running Qdrant (`docker compose up -d qdrant`).
-
-**Where processing runs** is chosen in the app (avatar menu → Processing, or "Change" in the upload dialog):
-
-- **This computer (default)** — `self-hosted-v1`: Whisper, X-CLIP, CLAP and BGE-M3 on the local CPU, local Qdrant. No keys, nothing leaves the machine.
-- **Cloud API (Gemini)** — `api-gemini-free-v1`: video is sent to Gemini for transcription, embeddings and captions; still uses the local Qdrant. Needs a Gemini API key, kept in the browser tab only (a backend runtime session is created from it).
+| Library grid | `GET /api/processing/jobs` |
+| Upload | `POST /api/processing/jobs` (multipart `video` + `configuration` JSON; header `X-Upload-Started-Ms` records upload time) |
+| Process / Stop / Delete | `POST …/{id}/start`, `POST …/{id}/cancel`, `DELETE …/{id}` |
+| Watch page | `GET …/{id}`, `GET …/{id}/video` (range requests), `GET …/{id}/windows`, `GET …/{id}/thumbnail` |
+| Chat | `GET/POST/DELETE …/{id}/chat` |
+| Cloud session (keys stay server-side) | `GET /api/runtime/env-session` |
 
 ## Tech Stack
 
-- **Backend**: Python, FastAPI, Qdrant (vector DB)
-- **Processing**: FFmpeg, Whisper (ASR), X-CLIP (visual), CLAP (audio), BGE-M3 (text), Gemini / OpenAI (VLM captions)
-- **Retrieval**: Named-vector search, reciprocal-rank fusion, Qwen-VL cross-encoder reranking
-- **Frontend**: Next.js 15, React 19, TypeScript, Tailwind CSS (Material 3 tokens, light/dark)
-- **Deploy**: Docker, Railway / Google Cloud Run
+- **Backend**: Python 3.11/3.12, FastAPI, Qdrant
+- **Processing**: FFmpeg; Gemini (Flash-Lite + Embedding 2) or local Whisper / X-CLIP / CLAP / BGE-M3; optional Qwen-VL captioning
+- **Retrieval**: Named-vector search, reciprocal-rank fusion, optional cross-encoder reranking
+- **Frontend**: Vite, React 19, TypeScript, Tailwind CSS
+- **Deploy**: Docker (API serves the built SPA when `SERVE_FRONTEND=1`), Railway / Google Cloud Run

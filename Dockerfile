@@ -46,8 +46,12 @@ RUN if [ ! -f test_assets/media/public_demo/animal_belly_rub.webm ]; then \
     fi
 COPY --from=frontend /frontend/dist ./video_search_frontend/dist
 
+# SERVE_FRONTEND makes the API also serve the built SPA; locally the Vite dev
+# server owns port 3000, so it stays off by default there.
 ENV PYTHONUNBUFFERED=1 \
     QUERY_LOW_MEMORY_MODE=1 \
+    SERVE_FRONTEND=1 \
+    FRONTEND_DIST_DIR=/app/video_search_frontend/dist \
     PORT=8000
 
 EXPOSE 8000

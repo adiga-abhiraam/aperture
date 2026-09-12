@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -161,10 +162,10 @@ class GeminiFlashLiteTranscriber:
         chunks: Sequence[GeminiMediaClip],
         *,
         progress_callback: Callable[[int, int], None] | None = None,
+        concurrency: int = 1,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> GeminiTranscriptionResult:
         previous_end = 0.0
-        segments: list[TranscriptSegment] = []
-        diagnostics: list[GeminiCallDiagnostics] = []
         for index, chunk in enumerate(chunks):
             if chunk.kind != "audio":
                 raise GeminiInputError("Gemini transcription accepts only audio clips")
@@ -173,7 +174,11 @@ class GeminiFlashLiteTranscriber:
                     "Gemini transcription chunks must not overlap; timestamps would duplicate"
                 )
             previous_end = chunk.end_seconds
-            payload, call = self.runtime.generate_json(
+
+        def transcribe_one(chunk: GeminiMediaClip) -> tuple[dict[str, Any], GeminiCallDiagnostics] | None:
+            if should_cancel is not None and should_cancel():
+                return None
+            return self.runtime.generate_json(
                 model=self.model,
                 prompt=_transcription_prompt(chunk.duration_seconds),
                 media_path=chunk.path,
@@ -181,10 +186,22 @@ class GeminiFlashLiteTranscriber:
                 response_schema=_TRANSCRIPTION_SCHEMA,
                 operation_name="transcription",
             )
-            diagnostics.append(call)
-            segments.extend(_parse_transcript_segments(payload, chunk))
-            if progress_callback is not None:
-                progress_callback(index + 1, len(chunks))
+
+        segments: list[TranscriptSegment] = []
+        diagnostics: list[GeminiCallDiagnostics] = []
+        # Chunks are independent (non-overlapping), so they can be sent
+        # concurrently; results are consumed in order so timestamps stay sorted.
+        with ThreadPoolExecutor(max_workers=max(1, int(concurrency))) as pool:
+            futures = [(chunk, pool.submit(transcribe_one, chunk)) for chunk in chunks]
+            for index, (chunk, future) in enumerate(futures):
+                outcome = future.result()
+                if outcome is None:
+                    continue
+                payload, call = outcome
+                diagnostics.append(call)
+                segments.extend(_parse_transcript_segments(payload, chunk))
+                if progress_callback is not None:
+                    progress_callback(index + 1, len(chunks))
         return GeminiTranscriptionResult(
             segments=tuple(sorted(segments, key=lambda item: (item.start, item.end))),
             diagnostics=tuple(diagnostics),
@@ -283,11 +300,17 @@ def _transcription_prompt(duration_seconds: float) -> str:
 
 
 def _caption_prompt(window: VideoWindow) -> str:
+    length = max(0.0, window.end - window.start)
     return (
-        "Describe only visible evidence in this surveillance-video window. Return the "
-        "requested JSON. Caption people, clothing, objects, actions, spatial context, "
-        f"and visible text from {window.start:g}s to {window.end:g}s. Do not infer "
-        "audio, intent, identity, or events outside the clip."
+        "You are given one short clip cut from a longer video. The clip is "
+        f"{length:g} seconds long and starts at 0; in the full video it covers "
+        f"{window.start:g}s-{window.end:g}s, but do NOT mention any timestamps. "
+        "Describe everything visible in the clip in 2-4 plain sentences: the setting, "
+        "people or animals (appearance, clothing, what they do), objects, on-screen text, "
+        "camera moves, and how the scene changes from the start of the clip to its end. "
+        "In `evidence`, list 3-8 short noun/verb phrases for the most specific visible "
+        "details (e.g. 'white piglet on a towel', 'hand scratching belly'). Do not infer "
+        "sound, intent, identity, or anything outside the clip. Return only the requested JSON."
     )
 
 

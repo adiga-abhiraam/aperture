@@ -27,6 +27,7 @@ from fastapi import APIRouter, File, Form, Header, HTTPException, Request, Respo
 from fastapi.responses import FileResponse
 
 from .gemini_runtime import (
+    GeminiAuthenticationError,
     GeminiKeyPool,
     GeminiRuntimeError,
     GoogleGenAIRuntime,
@@ -330,26 +331,44 @@ def _resolve_api_key(supplied: str | None, model: str = "") -> str:
     if is_openai_model(model):
         key = (supplied or "").strip() or os.environ.get("OPENAI_API_KEY", "").strip()
         if not key:
+            try:
+                from dotenv import load_dotenv
+                for p in [Path.cwd() / ".env", Path(__file__).resolve().parents[2] / ".env", Path(__file__).resolve().parents[1] / ".env"]:
+                    if p.is_file():
+                        load_dotenv(p)
+                key = os.environ.get("OPENAI_API_KEY", "").strip()
+            except Exception:
+                pass
+        if not key:
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    "No OpenAI API key available. Enter one in Developer settings, "
-                    "or set OPENAI_API_KEY in the backend environment."
-                ),
+                detail="No OpenAI API key available. Please set OPENAI_API_KEY in .env.",
             )
         return key
 
     key = (supplied or "").strip() or os.environ.get("GEMINI_API_KEY", "").strip()
-    if not key and os.environ.get("GEMINI_API_KEYS_JSON", "").strip():
-        parse_gemini_keys_json(os.environ["GEMINI_API_KEYS_JSON"])
-        return ""
+    pool_raw = os.environ.get("GEMINI_API_KEYS_JSON", "").strip()
+    if not key and (not pool_raw or pool_raw == "[]"):
+        try:
+            from dotenv import load_dotenv
+            for p in [Path.cwd() / ".env", Path(__file__).resolve().parents[2] / ".env", Path(__file__).resolve().parents[1] / ".env"]:
+                if p.is_file():
+                    load_dotenv(p)
+            key = os.environ.get("GEMINI_API_KEY", "").strip()
+            pool_raw = os.environ.get("GEMINI_API_KEYS_JSON", "").strip()
+        except Exception:
+            pass
+
+    if not key and pool_raw and pool_raw != "[]":
+        try:
+            parse_gemini_keys_json(pool_raw)
+            return ""
+        except GeminiAuthenticationError:
+            pass
     if not key:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "No Gemini API key available. Enter one in Developer settings, or "
-                "set GEMINI_API_KEY or GEMINI_API_KEYS_JSON in the backend environment."
-            ),
+            detail="No Gemini API key available. Please set GEMINI_API_KEY or GEMINI_API_KEYS_JSON in .env.",
         )
     return key
 
@@ -540,6 +559,8 @@ async def quick_voice_query(
     """Turn a spoken request into the search text, using the multimodal model."""
 
     resolved_model = (model or "").strip() or DEFAULT_MODEL
+    if resolved_model in ("self-hosted-engine", "self-hosted"):
+        resolved_model = DEFAULT_MODEL
     workspace = _CLIP_ROOT / f"voice_{uuid.uuid4().hex}"
     workspace.mkdir(parents=True, exist_ok=True)
     try:
@@ -632,6 +653,8 @@ async def quick_search(
 
     # Resolve the model first: it decides which provider's key is needed.
     resolved_model = (model or "").strip() or DEFAULT_MODEL
+    if resolved_model in ("self-hosted-engine", "self-hosted"):
+        resolved_model = DEFAULT_MODEL
 
     request_id = uuid.uuid4().hex
     workspace = _CLIP_ROOT / request_id

@@ -7,6 +7,8 @@ import math
 import mimetypes
 import os
 import re
+import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -38,6 +40,9 @@ from .library import (
 )
 from .preflight import model_statuses
 from .probe import VideoProbeError
+from .video_chat import ChatHistoryStore, VideoChatError, answer_question
+from .gemini_runtime import GeminiAuthenticationError, GeminiRuntimeError
+from .openai_runtime import OpenAIRuntimeError
 from .public_demo import (
     PublicDemoError,
     PublicSampleCatalog,
@@ -107,6 +112,27 @@ async def public_demo_error(_request: Request, exc: PublicDemoError):
     return JSONResponse(status_code=exc.status_code, content=exc.public())
 
 
+@app.exception_handler(GeminiAuthenticationError)
+async def gemini_auth_error(_request: Request, exc: GeminiAuthenticationError):
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.exception_handler(GeminiRuntimeError)
+async def gemini_runtime_error(_request: Request, exc: GeminiRuntimeError):
+    return JSONResponse(status_code=502, content={"detail": str(exc)})
+
+
+@app.exception_handler(OpenAIRuntimeError)
+async def openai_runtime_error(_request: Request, exc: OpenAIRuntimeError):
+    return JSONResponse(status_code=502, content={"detail": str(exc)})
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(_request: Request, exc: Exception):
+    logger.exception("Unhandled server error: %s", exc)
+    return JSONResponse(status_code=500, content={"detail": f"Internal server error: {exc}"})
+
+
 _DEVELOPER_PREFIXES = (
     "/api/runtime",
     "/api/processing",
@@ -155,6 +181,101 @@ try:
 except Exception as exc:  # noqa: BLE001 - a bad jobs folder must not stop the API
     logger.warning("Could not restore processing jobs (%s)", type(exc).__name__)
 query_api.set_runtime_session_resolver(runtime_sessions.get_runtime_config)
+
+chat_history = ChatHistoryStore()
+
+# The browser no longer holds provider keys.  When an upload asks for the
+# API profile without a session, one is created here from the backend's own
+# environment (GEMINI_API_KEY / GEMINI_API_KEYS_JSON, QDRANT_URL) and reused
+# until it expires.  The key never leaves this process.
+_ENV_SESSION_LOCK = threading.Lock()
+_ENV_SESSION_ID: str | None = None
+API_PROFILE_ID = "api-gemini-free-v1"
+
+
+def _env_gemini_key() -> str:
+    key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if key:
+        return key
+    pool_raw = os.environ.get("GEMINI_API_KEYS_JSON", "").strip()
+    if pool_raw and pool_raw != "[]":
+        try:
+            from .gemini_runtime import parse_gemini_keys_json
+
+            return parse_gemini_keys_json(pool_raw)[0]
+        except Exception:  # noqa: BLE001 - reported as "no key" below
+            return ""
+    return ""
+
+
+def _env_qdrant_setup() -> tuple[dict, dict]:
+    """Local Qdrant by default; Qdrant Cloud when the env points at one."""
+
+    url = os.environ.get("QDRANT_URL", "").strip() or "http://127.0.0.1:6333"
+    api_key = os.environ.get("QDRANT_API_KEY", "").strip()
+    is_local = any(host in url for host in ("localhost", "127.0.0.1", "0.0.0.0", "qdrant:"))
+    if api_key and not is_local:
+        return {"vector_store_target": "cloud", "qdrant_url": url}, {"qdrant_api_key": api_key}
+    return {"vector_store_target": "local", "qdrant_url": url}, {}
+
+
+def ensure_env_runtime_session():
+    """Return a live API-profile session backed by environment credentials."""
+
+    global _ENV_SESSION_ID
+    with _ENV_SESSION_LOCK:
+        if _ENV_SESSION_ID:
+            try:
+                return runtime_sessions.get(_ENV_SESSION_ID)
+            except RuntimeSessionNotFoundError:
+                _ENV_SESSION_ID = None
+        key = _env_gemini_key()
+        if not key:
+            raise ValueError(
+                "Cloud processing needs a Gemini API key. Set GEMINI_API_KEY in the backend .env "
+                "or switch the upload to the local engine."
+            )
+        configuration, credentials = _env_qdrant_setup()
+        configuration["consent_cloud_video"] = True
+        session = runtime_sessions.create(
+            API_PROFILE_ID, configuration, {"gemini_api_key": key, **credentials}
+        )
+        _ENV_SESSION_ID = session.id
+        logger.info("Created environment-backed API runtime session")
+        return session
+
+
+def _resolve_runtime_config(session_id: str) -> dict:
+    """Session lookup for workers that survives a backend restart.
+
+    Jobs persist only the opaque session id.  When that session has expired
+    or the process restarted, a job that was created with backend-owned
+    credentials is re-attached to the environment-backed session instead of
+    failing with "session not found".
+    """
+
+    try:
+        return runtime_sessions.get_runtime_config(session_id)
+    except RuntimeSessionNotFoundError:
+        try:
+            return ensure_env_runtime_session().runtime_config()
+        except ValueError as exc:
+            raise RuntimeSessionNotFoundError(str(exc)) from exc
+
+
+manager.set_runtime_config_resolver(_resolve_runtime_config)
+query_api.set_runtime_session_resolver(_resolve_runtime_config)
+
+
+@app.get("/api/runtime/env-session")
+def env_runtime_session():
+    """Opaque session id for API-profile search/chat when keys live in .env."""
+
+    try:
+        session = ensure_env_runtime_session()
+    except ValueError as exc:
+        return {"available": False, "profile_id": API_PROFILE_ID, "detail": str(exc)}
+    return {"available": True, "profile_id": API_PROFILE_ID, "session_id": session.id}
 
 # Stateless single-call video search and indexing; independent of the
 # Qdrant-backed pipeline above.
@@ -542,22 +663,38 @@ def preflight_runtime_session(session_id: str):
 
 
 @app.post("/api/processing/jobs", status_code=201)
-async def create_job(video: UploadFile = File(...), configuration: str = Form("{}")):
+async def create_job(
+    request: Request, video: UploadFile = File(...), configuration: str = Form("{}")
+):
+    # The browser stamps when it began sending so the library can show a real
+    # upload time next to the processing time.
+    upload_seconds: float | None = None
+    started_header = request.headers.get("x-upload-started-ms", "")
+    if started_header.strip():
+        try:
+            upload_seconds = time.time() - float(started_header) / 1000.0
+        except ValueError:
+            upload_seconds = None
     try:
         config = json.loads(configuration)
         if not isinstance(config, dict):
             raise ValueError("Job configuration must be a JSON object")
-        if config.get("profile_id") == "api-gemini-free-v1":
+        if config.get("profile_id") == API_PROFILE_ID:
             session_id = config.get("runtime_session_id")
             if not isinstance(session_id, str) or not session_id.strip():
-                raise ValueError("API-based indexing requires an active runtime session")
+                # Dashboard uploads carry no key; use the backend's own.
+                session_id = ensure_env_runtime_session().id
+                config["runtime_session_id"] = session_id
             # Fail before storing the upload if the opaque session expired.
             session = runtime_sessions.get(session_id)
             if session.profile.id != config.get("profile_id"):
                 raise ValueError("Runtime session profile does not match the indexing job")
             config = _normalize_api_job_configuration(config, session)
         data = await video.read()
-        job = manager.create(video.filename or "", data, config)
+        if upload_seconds is None:
+            job = manager.create(video.filename or "", data, config)
+        else:
+            job = manager.create(video.filename or "", data, config, upload_seconds=upload_seconds)
         return job.public()
     except (ValueError, VideoProbeError, RuntimeSessionNotFoundError, json.JSONDecodeError) as exc:
         raise HTTPException(400, str(exc))
@@ -665,6 +802,66 @@ def evaluation(job_id: str, window_index: int, label: dict):
         json.dumps(job.evaluations, indent=2), encoding="utf-8"
     )
     return {"saved": True}
+
+
+@app.get("/api/processing/jobs/{job_id}/chat")
+def chat_history_for_job(job_id: str):
+    job = job_or_404(job_id)
+    return {"messages": chat_history.load(job.id, job.directory)}
+
+
+@app.delete("/api/processing/jobs/{job_id}/chat", status_code=204)
+def clear_chat_history(job_id: str):
+    job = job_or_404(job_id)
+    chat_history.clear(job.id, job.directory)
+    return Response(status_code=204)
+
+
+@app.post("/api/processing/jobs/{job_id}/chat")
+def chat_with_video(job_id: str, body: dict):
+    """Answer one question about this video from its transcript and captions."""
+
+    job = job_or_404(job_id)
+    question = str(body.get("question") or "").strip()
+    if not question:
+        raise HTTPException(400, "Ask a question about the video.")
+    if not job.windows:
+        if job.status in ("queued", "running"):
+            raise HTTPException(409, "This video is still processing. Ask again once it finishes.")
+        raise HTTPException(409, "Process this video first so there is a transcript to ask about.")
+    history = chat_history.load(job.id, job.directory)
+    user_message = {
+        "id": f"user-{int(time.time() * 1000)}",
+        "role": "user",
+        "content": question,
+        "created_at": time.time(),
+    }
+    try:
+        result = answer_question(
+            windows=job.windows,
+            title=job.title,
+            duration_seconds=float(job.metadata.get("duration") or 0.0),
+            question=question,
+            history=history,
+            video_path=job.video_path,
+        )
+    except VideoChatError as exc:
+        raise HTTPException(400, str(exc))
+    except GeminiRuntimeError as exc:
+        raise HTTPException(502, f"The chat model could not answer: {exc}")
+    assistant_message = {
+        "id": f"assistant-{int(time.time() * 1000)}",
+        "role": "assistant",
+        "content": result["answer"],
+        "citations": result["citations"],
+        "found_in_video": result["found_in_video"],
+        "source": result.get("source", "transcript"),
+        "model": result["model"],
+        "elapsed_seconds": result["elapsed_seconds"],
+        "created_at": time.time(),
+    }
+    chat_history.append(job.id, job.directory, user_message, assistant_message)
+    return {"message": assistant_message}
 
 
 @app.get("/api/processing/jobs/{job_id}/video")
@@ -892,8 +1089,22 @@ def query_health():
     return query_api.health()
 
 
-# Registered last so real API routes always win and unknown frontend paths can
-# fall back to index.html for client-side routing.
+# Gated behind SERVE_FRONTEND so port 8000 remains a pure JSON API by default.
 from .frontend_hosting import install_frontend  # noqa: E402
 
-install_frontend(app)
+if os.environ.get("SERVE_FRONTEND", "").lower() in ("1", "true", "yes"):
+    install_frontend(app)
+else:
+    @app.get("/", include_in_schema=False)
+    def api_root():
+        return {
+            "status": "ok",
+            "service": "Aperture Backend API",
+            "message": "API is active. Interactive documentation is available at /docs.",
+            "endpoints": {
+                "docs": "/docs",
+                "health": "/api/query/health",
+                "jobs": "/api/processing/jobs",
+                "search": "/api/query/search",
+            },
+        }

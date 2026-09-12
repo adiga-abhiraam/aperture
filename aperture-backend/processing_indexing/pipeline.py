@@ -1,6 +1,8 @@
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+import threading
 import time
 
 from .config import Settings
@@ -71,6 +73,7 @@ class ProcessingPipeline:
         self.clock = clock
         self.progress_callback = progress_callback
         self.stage_durations = {name: 0.0 for name in STAGES}
+        self._lock = threading.Lock()
 
     def _progress(self, stage, fraction, current_window=0, total_windows=0):
         if self.progress_callback is not None:
@@ -81,33 +84,37 @@ class ProcessingPipeline:
         try:
             return operation()
         finally:
-            self.stage_durations[stage] += self.clock() - started
+            elapsed = self.clock() - started
+            with self._lock:
+                self.stage_durations[stage] += elapsed
 
     def _prepare(self, path, windows, segments, has_audio):
         prepared = []
         errors = {}
         total = len(windows)
-        for index, window in enumerate(windows):
-            self._progress("embedding_windows", 0.20 + 0.35 * index / max(total, 1), index, total)
-            try:
-                transcript = transcript_for_window(segments, window.start, window.end)
-                visual = self._timed("xclip", lambda: self.visual.encode(path, window))
-                audio = self._timed(
-                    "clap", lambda: self.audio.encode(path, window, has_audio)
-                )
-                speech = self._timed(
-                    "bge_m3_speech", lambda: self.text.encode([transcript])[0]
-                )
-                meaningful_audio = has_audio and any(
-                    abs(value) > 1e-8 for value in audio
-                )
-                prepared.append(
-                    PreparedWindow(
-                        window, transcript, visual, audio, speech, meaningful_audio
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            for index, window in enumerate(windows):
+                self._progress("embedding_windows", 0.20 + 0.35 * index / max(total, 1), index, total)
+                try:
+                    transcript = transcript_for_window(segments, window.start, window.end)
+                    f_visual = executor.submit(self._timed, "xclip", lambda w=window: self.visual.encode(path, w))
+                    f_audio = executor.submit(self._timed, "clap", lambda w=window: self.audio.encode(path, w, has_audio))
+                    f_speech = executor.submit(self._timed, "bge_m3_speech", lambda t=transcript: self.text.encode([t])[0])
+
+                    visual = f_visual.result()
+                    audio = f_audio.result()
+                    speech = f_speech.result()
+
+                    meaningful_audio = has_audio and any(
+                        abs(value) > 1e-8 for value in audio
                     )
-                )
-            except Exception as exc:
-                errors[window.window_id] = str(exc)
+                    prepared.append(
+                        PreparedWindow(
+                            window, transcript, visual, audio, speech, meaningful_audio
+                        )
+                    )
+                except Exception as exc:
+                    errors[window.window_id] = str(exc)
         return prepared, errors
 
     def _select(self, prepared):

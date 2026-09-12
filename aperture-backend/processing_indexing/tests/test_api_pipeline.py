@@ -393,7 +393,7 @@ def test_retry_stops_after_bounded_quota_attempts_without_secret_leak():
             sleep=lambda _delay: None,
         )
 
-    assert calls == 3
+    assert calls == GeminiRetryPolicy().max_attempts
     assert "super-secret-token" not in str(raised.value)
 
 

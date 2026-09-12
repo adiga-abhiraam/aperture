@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 # Keep local configuration optional and explicit.  Real environment values
 # remain authoritative because load_dotenv never overrides them by default.
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(_REPO_ROOT / ".env")
 load_dotenv(_PROJECT_ROOT / ".env.processing")
 load_dotenv(_PROJECT_ROOT / ".env")
 

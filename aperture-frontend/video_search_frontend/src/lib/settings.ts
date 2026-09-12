@@ -81,7 +81,8 @@ const INDEX_MODEL_KEY = 'footageask.indexModel'
 const LANGUAGE_KEY = 'footageask.language'
 
 export function getModel(): string {
-  return readLocal(MODEL_KEY, DEFAULT_MODEL)
+  const value = readLocal(MODEL_KEY, DEFAULT_MODEL)
+  return value === 'self-hosted-engine' ? DEFAULT_MODEL : value
 }
 
 export function setModel(model: string): void {
@@ -93,7 +94,8 @@ export function useModel() {
 }
 
 export function getIndexModel(): string {
-  return readLocal(INDEX_MODEL_KEY, DEFAULT_INDEX_MODEL)
+  const value = readLocal(INDEX_MODEL_KEY, DEFAULT_INDEX_MODEL)
+  return value === 'self-hosted-engine' ? DEFAULT_INDEX_MODEL : value
 }
 
 export function setIndexModel(model: string): void {
@@ -116,7 +118,8 @@ export function useLanguage() {
   return useStoredValue(getLanguage, setLanguage)
 }
 
-// Keys live in sessionStorage: cleared when the tab closes, never on disk.
+// Keys live in sessionStorage only. When none is set the backend uses the
+// keys from its own .env, so nothing secret is ever compiled into the bundle.
 export function getApiKey(provider: string): string {
   try {
     return window.sessionStorage.getItem(`footageask.key.${provider}`) || ''
@@ -157,7 +160,7 @@ const DEPLOYMENT_KEY = 'footageask.deployment'
 const QDRANT_KEY = 'footageask.qdrantTarget'
 
 export function getDeployment(): string {
-  return readLocal(DEPLOYMENT_KEY, 'api-based')
+  return 'self-hosted'
 }
 
 export function setDeployment(value: string): void {
@@ -169,7 +172,7 @@ export function useDeployment() {
 }
 
 export function getQdrantTarget(): string {
-  return readLocal(QDRANT_KEY, 'local')
+  return 'local'
 }
 
 export function setQdrantTarget(value: string): void {

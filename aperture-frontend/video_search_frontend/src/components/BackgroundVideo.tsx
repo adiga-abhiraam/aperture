@@ -34,9 +34,12 @@ export function BackgroundVideo() {
       if (t < 1) raf = requestAnimationFrame(step)
     }
 
-    void video.play().then(() => {
-      raf = requestAnimationFrame(step)
-    })
+    void video
+      .play()
+      .then(() => {
+        raf = requestAnimationFrame(step)
+      })
+      .catch(() => {})
 
     return () => cancelAnimationFrame(raf)
   }, [])
