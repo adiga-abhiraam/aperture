@@ -3,7 +3,9 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 import os
+import shutil
 import threading
 import time
 import uuid
@@ -17,6 +19,8 @@ from .models import VLMDescription
 from .preflight import model_statuses
 from .probe import probe_video, stable_video_id
 
+logger = logging.getLogger(__name__)
+
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
 SECRET_KEYS = {
     "openai_api_key",
@@ -27,6 +31,7 @@ SECRET_KEYS = {
     "authorization",
 }
 MAX_ACTIVITY_ENTRIES = 400
+JOB_STATE_FILE = "job.json"
 
 
 def summarize_openai_usage(openai_debug):
@@ -130,6 +135,51 @@ class Job:
         """Return non-public execution settings without exposing credentials."""
         return self.private_config or self.config
 
+    @property
+    def title(self) -> str:
+        """Display name chosen at upload time, falling back to the filename."""
+        title = self.config.get("title")
+        if isinstance(title, str) and title.strip():
+            return title.strip()[:200]
+        return str(self.metadata.get("filename") or self.id)
+
+    def summary(self) -> dict:
+        """Compact listing row: everything the library grid needs, no diagnostics."""
+        return sanitize(
+            {
+                "job_id": self.id,
+                "title": self.title,
+                "status": self.status,
+                "stage": self.stage,
+                "progress": self.progress,
+                "created_at": self.created_at,
+                "started_at": self.started_at,
+                "finished_at": self.finished_at,
+                "metadata": self.metadata,
+                "total_windows": self.total_windows or len(self.windows),
+                "indexed_windows": self.report.get("successfully_indexed_windows", 0),
+                "errors": self.errors[:3],
+            }
+        )
+
+    def persisted_state(self) -> dict:
+        """The part of a job that must survive a process restart (see restore)."""
+        return sanitize(
+            {
+                "job_id": self.id,
+                "filename": self.video_path.name,
+                "status": self.status,
+                "stage": self.stage,
+                "progress": self.progress,
+                "created_at": self.created_at,
+                "started_at": self.started_at,
+                "finished_at": self.finished_at,
+                "config": self.config,
+                "metadata": self.metadata,
+                "total_windows": self.total_windows,
+            }
+        )
+
     def public(self):
         statuses = [
             x.model_dump()
@@ -150,6 +200,10 @@ class Job:
                 "status": self.status,
                 "stage": self.stage,
                 "progress": self.progress,
+                "title": self.title,
+                "created_at": self.created_at,
+                "started_at": self.started_at,
+                "finished_at": self.finished_at,
                 "current_window": self.current_window,
                 "total_windows": self.total_windows,
                 "elapsed_seconds": (self.finished_at or time.time())
@@ -206,6 +260,7 @@ class JobManager:
             private_config=dict(config),
         )
         self.jobs[job_id] = job
+        self._persist(job)
         self._event(job, "created")
         self._activity(
             job,
@@ -226,6 +281,99 @@ class JobManager:
             return self.jobs[job_id]
         except KeyError:
             raise KeyError("Job not found")
+
+    def list(self) -> list[Job]:
+        """Every known job, newest first."""
+        return sorted(self.jobs.values(), key=lambda job: job.created_at, reverse=True)
+
+    def _persist(self, job: Job) -> None:
+        """Write the restart-safe job record; never raises on a full disk."""
+        try:
+            (job.directory / JOB_STATE_FILE).write_text(
+                json.dumps(job.persisted_state(), indent=2), encoding="utf-8"
+            )
+        except OSError as exc:
+            logger.warning("Could not persist job %s state (%s)", job.id, type(exc).__name__)
+
+    def restore(self) -> int:
+        """Reload jobs from their directories after a restart.
+
+        A job is in memory only while the process lives, but its directory is
+        durable: the upload, ``job.json`` and (once run) the export files.
+        Anything mid-run when the process died is marked failed rather than
+        left looking like it is still processing.
+        """
+        restored = 0
+        for directory in sorted(self.root.iterdir()):
+            if not directory.is_dir() or directory.name in self.jobs:
+                continue
+            try:
+                job = self._restore_one(directory)
+            except Exception as exc:  # noqa: BLE001 - one bad folder must not hide the rest
+                logger.warning("Skipping job directory %s (%s)", directory.name, type(exc).__name__)
+                continue
+            if job is not None:
+                self.jobs[job.id] = job
+                restored += 1
+        return restored
+
+    def _restore_one(self, directory: Path) -> Job | None:
+        state_path = directory / JOB_STATE_FILE
+        if state_path.is_file():
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            video_path = (directory / safe_filename(str(state["filename"]))).resolve()
+            if not video_path.is_file():
+                return None
+            metadata = dict(state.get("metadata") or {})
+            config = dict(state.get("config") or {})
+        else:
+            # Directory from before job.json existed: probe the upload again.
+            candidates = [x for x in directory.iterdir() if x.suffix.lower() in VIDEO_EXTENSIONS]
+            if not candidates:
+                return None
+            video_path = candidates[0].resolve()
+            metadata = probe_video(video_path).model_dump()
+            metadata["video_id"] = stable_video_id(video_path)
+            metadata["filename"] = video_path.name
+            config = {}
+            state = {"created_at": video_path.stat().st_mtime}
+
+        job = Job(directory.name, directory, video_path, sanitize(config), metadata)
+        job.created_at = float(state.get("created_at") or job.created_at)
+        job.started_at = state.get("started_at")
+        job.finished_at = state.get("finished_at")
+        job.total_windows = int(state.get("total_windows") or 0)
+
+        exports = directory / "exports"
+        report_path = exports / "processing_report.json"
+        if report_path.is_file():
+            job.report = json.loads(report_path.read_text(encoding="utf-8"))
+            job.status = str(job.report.get("status") or "failed")
+            job.stage = job.status
+            job.progress = 1.0
+            windows_path = exports / "window_debug.jsonl"
+            if windows_path.is_file():
+                job.windows = [
+                    json.loads(line)
+                    for line in windows_path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+            errors_path = exports / "errors.json"
+            if errors_path.is_file():
+                job.errors = json.loads(errors_path.read_text(encoding="utf-8"))
+            activity_path = exports / "activity.json"
+            if activity_path.is_file():
+                job.activity = json.loads(activity_path.read_text(encoding="utf-8"))
+                job.activity_sequence = len(job.activity)
+        elif state.get("status") in (None, "created"):
+            job.status = "created"
+        else:
+            # Was queued/running when the process stopped; there is no result.
+            job.status = "failed"
+            job.stage = "interrupted"
+            job.errors = [{"message": "Processing was interrupted by a server restart"}]
+        self._persist(job)
+        return job
 
     def _event(self, job: Job, event: str, **details):
         job.events.append(
@@ -316,13 +464,34 @@ class JobManager:
         with self._lock:
             if self._active and self._active != job_id:
                 raise RuntimeError("Another processing job is active")
-            # A job directory is a durable record of one attempt.  Reusing it
-            # after cancellation/failure previously mixed old rows with a new
-            # run, so the UI now makes every retry a fresh upload/job.
-            if job.status != "created":
-                raise RuntimeError("Job cannot be started")
+            if job.status in ("queued", "running") or self._active == job_id:
+                raise RuntimeError("Job is already running or queued")
+
+            # Reset in-memory and disk state from any previous run so retrying
+            # never mixes old window rows, errors, activity, or stale exports.
+            job.cancel_requested = False
+            job.windows = []
+            job.errors = []
+            job.report = {}
+            job.progress = 0.0
+            job.current_window = 0
+            job.total_windows = 0
+            job.started_at = None
+            job.finished_at = None
+            job.model_activity = {}
+            job.evaluations = {}
+            job.activity = []
+            job.activity_sequence = 0
+            job.events = []
+
+            exports = job.directory / "exports"
+            if exports.is_dir():
+                shutil.rmtree(exports, ignore_errors=True)
+
             self._active = job_id
             job.status = "queued"
+            job.stage = "queued"
+            self._persist(job)
             self._activity(
                 job,
                 "job",
@@ -331,6 +500,55 @@ class JobManager:
             )
         threading.Thread(target=self._run, args=(job,), daemon=True).start()
         return job
+
+    def delete(self, job_id: str) -> dict:
+        """Remove a job: its indexed windows (best effort), then its directory.
+
+        Refuses while the job is running so a worker never writes into a
+        folder that is being deleted.  A Qdrant outage does not block the
+        delete; the caller is told how many points were removed so the UI can
+        say when the index still has stale rows.
+        """
+        job = self.get(job_id)
+        with self._lock:
+            if job.status in ("queued", "running") or self._active == job_id:
+                raise RuntimeError("Stop processing before deleting this video")
+            del self.jobs[job_id]
+
+        index_cleared = None
+        video_id = job.metadata.get("video_id")
+        if video_id and job.runtime_config().get("index_qdrant") and job.windows:
+            try:
+                index_cleared = self._delete_index_points(job, str(video_id))
+            except Exception as exc:  # noqa: BLE001 - never leave the folder behind
+                logger.warning("Index cleanup for job %s skipped (%s)", job_id, type(exc).__name__)
+                index_cleared = False
+
+        shutil.rmtree(job.directory, ignore_errors=True)
+        return {"deleted": job_id, "index_cleared": index_cleared}
+
+    def _delete_index_points(self, job: Job, video_id: str) -> bool:
+        from qdrant_client import QdrantClient
+        from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchValue
+
+        settings = self._settings(job)
+        client = QdrantClient(
+            url=settings.qdrant_url,
+            api_key=settings.qdrant_api_key,
+            timeout=int(settings.qdrant_timeout_seconds),
+        )
+        try:
+            if not client.collection_exists(settings.collection_name):
+                return True
+            client.delete(
+                collection_name=settings.collection_name,
+                points_selector=FilterSelector(
+                    filter=Filter(must=[FieldCondition(key="video_id", match=MatchValue(value=video_id))])
+                ),
+            )
+            return True
+        finally:
+            client.close()
 
     def cancel(self, job_id: str):
         job = self.get(job_id)
@@ -493,6 +711,7 @@ class JobManager:
             self._write_artifacts(job)
         finally:
             self._forget_runtime_credentials(job)
+            self._persist(job)
             with self._lock:
                 if self._active == job.id:
                     self._active = None

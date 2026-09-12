@@ -146,6 +146,14 @@ async def protect_developer_routes(request: Request, call_next):
 # responses always call RuntimeSession.public().
 runtime_sessions = RuntimeSessionStore()
 manager = JobManager(runtime_config_resolver=runtime_sessions.get_runtime_config)
+# Jobs live in memory, but their directories are durable.  Reload them so the
+# library survives a restart instead of silently starting empty.
+try:
+    _restored = manager.restore()
+    if _restored:
+        logger.info("Restored %d processing job(s) from %s", _restored, manager.root)
+except Exception as exc:  # noqa: BLE001 - a bad jobs folder must not stop the API
+    logger.warning("Could not restore processing jobs (%s)", type(exc).__name__)
 query_api.set_runtime_session_resolver(runtime_sessions.get_runtime_config)
 
 # Stateless single-call video search and indexing; independent of the
@@ -370,6 +378,38 @@ def media_response(path, request: Request):
     )
 
 
+def extract_poster_frame(video_path: Path, output: Path, duration: float, ffmpeg: str = "ffmpeg") -> None:
+    """Write one downscaled JPEG frame from early in the video."""
+    import subprocess
+
+    # Slightly in from the start avoids black lead-in frames on most encodes.
+    at = min(0.5, max(0.0, duration / 10)) if duration else 0.0
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{at:.3f}",
+            "-i",
+            str(video_path),
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale='min(640,iw)':-2",
+            "-q:v",
+            "4",
+            str(output),
+        ],
+        check=True,
+        timeout=30,
+        capture_output=True,
+    )
+    if not output.is_file():
+        raise RuntimeError("ffmpeg produced no frame")
+
+
 def job_or_404(job_id):
     try:
         return manager.get(job_id)
@@ -519,9 +559,38 @@ async def create_job(video: UploadFile = File(...), configuration: str = Form("{
         raise HTTPException(400, str(exc))
 
 
+@app.get("/api/processing/jobs")
+def list_jobs():
+    """Compact rows for every known job, newest first (the video library)."""
+    return {"jobs": [job.summary() for job in manager.list()]}
+
+
 @app.get("/api/processing/jobs/{job_id}")
 def get_job(job_id: str):
     return job_or_404(job_id).public()
+
+
+@app.get("/api/processing/jobs/{job_id}/thumbnail")
+def thumbnail(job_id: str):
+    """A poster frame for the upload, extracted once with ffmpeg and cached."""
+    job = job_or_404(job_id)
+    path = job.directory / "thumbnail.jpg"
+    if not path.is_file():
+        try:
+            extract_poster_frame(job.video_path, path, float(job.metadata.get("duration") or 0))
+        except Exception as exc:  # noqa: BLE001 - a poster is optional
+            logger.warning("Thumbnail for job %s failed (%s)", job_id, type(exc).__name__)
+            raise HTTPException(404, "Thumbnail unavailable")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+@app.delete("/api/processing/jobs/{job_id}")
+def delete_job(job_id: str):
+    job_or_404(job_id)
+    try:
+        return manager.delete(job_id)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc))
 
 
 @app.post("/api/processing/jobs/{job_id}/start")
