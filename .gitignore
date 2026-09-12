@@ -69,3 +69,6 @@ pnpm-debug.log*
 .idea/
 .claude/
 *.swp
+
+# Next.js incremental build info
+aperture-frontend/tsconfig.tsbuildinfo

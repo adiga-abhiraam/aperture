@@ -1,0 +1,125 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---- Material-3 inspired palette (light) ---------------------------------- */
+:root {
+  color-scheme: light;
+  --c-bg: 248 249 250;               /* #f8f9fa page ground              */
+  --c-surface: 255 255 255;          /* cards, app bar                   */
+  --c-surface-low: 243 246 252;      /* #f3f6fc                          */
+  --c-surface-container: 241 243 244;/* #f1f3f4 search, chips            */
+  --c-surface-high: 232 234 237;     /* #e8eaed                          */
+  --c-surface-highest: 218 220 224;  /* #dadce0                          */
+  --c-outline: 218 220 224;          /* #dadce0 hairlines                */
+  --c-outline-variant: 232 234 237;
+  --c-on-surface: 31 31 31;          /* #1f1f1f                          */
+  --c-on-surface-variant: 68 71 70;  /* #444746                          */
+  --c-on-surface-muted: 95 99 104;   /* #5f6368                          */
+  --c-primary: 11 87 208;            /* #0b57d0 Google blue              */
+  --c-primary-hover: 8 66 160;       /* #0842a0                          */
+  --c-on-primary: 255 255 255;
+  --c-primary-container: 211 227 253;/* #d3e3fd                          */
+  --c-on-primary-container: 4 30 73; /* #041e49                          */
+  --c-success: 30 142 62;            /* #1e8e3e                          */
+  --c-success-container: 230 244 234;/* #e6f4ea                          */
+  --c-warning: 227 116 0;            /* #e37400                          */
+  --c-warning-container: 254 247 224;/* #fef7e0                          */
+  --c-error: 217 48 37;              /* #d93025                          */
+  --c-error-container: 252 232 230;  /* #fce8e6                          */
+}
+
+.dark {
+  color-scheme: dark;
+  --c-bg: 19 19 20;                  /* #131314                          */
+  --c-surface: 30 31 32;             /* #1e1f20                          */
+  --c-surface-low: 27 28 29;
+  --c-surface-container: 40 42 44;   /* #282a2c                          */
+  --c-surface-high: 51 53 55;        /* #333537                          */
+  --c-surface-highest: 68 70 72;
+  --c-outline: 68 71 70;             /* #444746                          */
+  --c-outline-variant: 51 53 55;
+  --c-on-surface: 227 227 227;       /* #e3e3e3                          */
+  --c-on-surface-variant: 196 199 197;
+  --c-on-surface-muted: 154 160 166; /* #9aa0a6                          */
+  --c-primary: 168 199 250;          /* #a8c7fa                          */
+  --c-primary-hover: 211 227 253;
+  --c-on-primary: 6 46 111;          /* #062e6f                          */
+  --c-primary-container: 8 66 160;   /* #0842a0                          */
+  --c-on-primary-container: 211 227 253;
+  --c-success: 129 201 149;          /* #81c995                          */
+  --c-success-container: 24 54 36;
+  --c-warning: 253 214 99;           /* #fdd663                          */
+  --c-warning-container: 62 46 8;
+  --c-error: 242 139 130;            /* #f28b82                          */
+  --c-error-container: 72 26 22;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  @apply bg-bg text-on-surface font-sans antialiased;
+  font-size: 14px;
+  line-height: 20px;
+  overflow-x: hidden;
+}
+
+/* Thin, unobtrusive scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--c-surface-highest)) transparent;
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--c-surface-highest));
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Material "state layer" hover for icon buttons and list rows */
+.state-layer {
+  @apply relative transition-colors duration-150;
+}
+.state-layer::after {
+  content: "";
+  @apply absolute inset-0 rounded-[inherit] bg-on-surface opacity-0 transition-opacity duration-150 pointer-events-none;
+}
+.state-layer:hover::after {
+  opacity: 0.08;
+}
+.state-layer:active::after {
+  opacity: 0.12;
+}
+
+/* Focus rings that match the accent */
+:focus-visible {
+  outline: 2px solid rgb(var(--c-primary));
+  outline-offset: 2px;
+}
+
+/* Native range inputs used by the player */
+input[type="range"] {
+  accent-color: rgb(var(--c-primary));
+}
+
+select {
+  background-image: none;
+}

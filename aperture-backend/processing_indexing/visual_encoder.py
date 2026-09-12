@@ -27,7 +27,10 @@ class XClipVisualEncoder:
         import torch
 
         if self._model is None:
-            from transformers import XCLIPModel, XCLIPProcessor
+            try:
+                from transformers import XCLIPModel, XCLIPProcessor
+            except ImportError:
+                from transformers import AutoModel as XCLIPModel, AutoProcessor as XCLIPProcessor
 
             load_kwargs = model_load_kwargs(self.model_name)
             self._processor = XCLIPProcessor.from_pretrained(

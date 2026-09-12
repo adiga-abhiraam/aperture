@@ -23,21 +23,30 @@ class ClapAudioEncoder:
             None,
             None,
         )
+        self._audio_cache = {}
+
+    def _get_audio(self, video_path):
+        key = str(video_path)
+        if key not in self._audio_cache:
+            import librosa
+            audio, _ = librosa.load(key, sr=48000, mono=True)
+            self._audio_cache[key] = audio
+        return self._audio_cache[key]
 
     def encode(self, video_path, window, has_audio):
         if not has_audio:
             return SILENT_AUDIO_VECTOR.copy()
-        import librosa
         import numpy as np
         import torch
 
-        audio, _ = librosa.load(
-            str(video_path),
-            sr=48000,
-            mono=True,
-            offset=window.start,
-            duration=window.end - window.start,
-        )
+        try:
+            full_audio = self._get_audio(video_path)
+            start_sample = int(window.start * 48000)
+            end_sample = int(window.end * 48000)
+            audio = full_audio[start_sample:end_sample]
+        except Exception:
+            return SILENT_AUDIO_VECTOR.copy()
+
         if audio.size == 0 or float(np.max(np.abs(audio))) < 1e-8:
             return SILENT_AUDIO_VECTOR.copy()
         if self._model is None:
@@ -58,11 +67,14 @@ class ClapAudioEncoder:
                 .to(self.device)
                 .eval()
             )
+        try:
+            processed = self._processor(audios=audio, sampling_rate=48000, return_tensors="pt")
+        except TypeError:
+            processed = self._processor(audio=audio, sampling_rate=48000, return_tensors="pt")
+
         inputs = {
             k: v.to(self.device)
-            for k, v in self._processor(
-                audios=audio, sampling_rate=48000, return_tensors="pt"
-            ).items()
+            for k, v in processed.items()
         }
         with torch.inference_mode():
             vector = (

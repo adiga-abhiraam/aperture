@@ -753,6 +753,12 @@ def _search_api_profile(request: SearchRequest) -> SearchResponse:
             timeout=float(runtime.get("qdrant_timeout_seconds", 10)),
         )
         profile_filter = _api_profile_query_filter(contract)
+        if request.video_id:
+            from qdrant_client.models import FieldCondition, MatchValue
+
+            profile_filter.must.append(
+                FieldCondition(key="video_id", match=MatchValue(value=request.video_id))
+            )
         for modality in ("visual", "audio", "transcript", "caption"):
             points = client.query_points(
                 collection_name=contract.collection_name,
@@ -903,9 +909,16 @@ def search(request: SearchRequest) -> SearchResponse:
         # milliseconds for normal collections and is much more reliable
         # than a fan-out burst after a cold model load.
         for modality in modalities:
-            modality_hits[modality] = _SEARCH_FNS[modality](
-                query_vectors[modality], config.DEFAULT_TOP_K
-            )
+            # Only pass the filter when set so test doubles with the historic
+            # two-argument signature keep working.
+            if request.video_id:
+                modality_hits[modality] = _SEARCH_FNS[modality](
+                    query_vectors[modality], config.DEFAULT_TOP_K, video_id=request.video_id
+                )
+            else:
+                modality_hits[modality] = _SEARCH_FNS[modality](
+                    query_vectors[modality], config.DEFAULT_TOP_K
+                )
     except QdrantSearchError as exc:
         raise HTTPException(503, detail=f"Qdrant is unreachable; search is unavailable: {exc}") from exc
 
