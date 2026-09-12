@@ -14,21 +14,17 @@ export interface ModelChoice {
 }
 
 export const QUERY_MODELS: readonly ModelChoice[] = [
-  { id: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite', provider: 'gemini' },
-  { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite', provider: 'gemini' },
+  { id: 'self-hosted-engine', label: 'Self-Hosted Local Engine (Whisper + X-CLIP + CLAP + BGE-M3)', provider: 'gemini' },
 ]
 
 export const INDEX_MODELS: readonly ModelChoice[] = [
-  { id: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite', provider: 'gemini' },
-  { id: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite', provider: 'gemini' },
-  { id: 'gpt-4.1-mini', label: 'OpenAI GPT-4.1 mini', provider: 'openai' },
-  { id: 'gpt-5-mini', label: 'OpenAI GPT-5 mini', provider: 'openai' },
+  { id: 'self-hosted-engine', label: 'Self-Hosted Local Engine (Whisper + X-CLIP + CLAP + BGE-M3)', provider: 'gemini' },
 ]
 
 export type ModelId = string
 
-export const DEFAULT_MODEL = 'gemini-3.1-flash-lite'
-export const DEFAULT_INDEX_MODEL = 'gemini-3.1-flash-lite'
+export const DEFAULT_MODEL = 'self-hosted-engine'
+export const DEFAULT_INDEX_MODEL = 'self-hosted-engine'
 
 export function providerOf(id: string, options: readonly ModelChoice[]): string {
   return options.find((option) => option.id === id)?.provider ?? 'gemini'
@@ -157,7 +153,7 @@ const DEPLOYMENT_KEY = 'footageask.deployment'
 const QDRANT_KEY = 'footageask.qdrantTarget'
 
 export function getDeployment(): string {
-  return readLocal(DEPLOYMENT_KEY, 'api-based')
+  return 'self-hosted'
 }
 
 export function setDeployment(value: string): void {
@@ -169,7 +165,7 @@ export function useDeployment() {
 }
 
 export function getQdrantTarget(): string {
-  return readLocal(QDRANT_KEY, 'local')
+  return 'local'
 }
 
 export function setQdrantTarget(value: string): void {

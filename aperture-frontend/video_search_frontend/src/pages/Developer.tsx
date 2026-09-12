@@ -1,10 +1,9 @@
 import { useState } from 'react'
-import { Check, Cloud, KeyRound, Plus, Server, Trash2 } from 'lucide-react'
+import { Check, KeyRound, Plus, Server, Trash2 } from 'lucide-react'
 import { PageShell } from '../components/PageShell'
 import {
   INDEX_MODELS,
   QUERY_MODELS,
-  providerOf,
   useApiKey,
   useDeployment,
   useIndexModel,
@@ -24,29 +23,9 @@ import { stringsFor } from '../lib/i18n'
 // taken from processing_indexing/runtime_profiles.py.
 const PROFILES = [
   {
-    id: 'api-based',
-    label: 'API-based',
-    blurb: 'Hosted models, nothing downloaded. Fastest to run, needs keys.',
-    icon: Cloud,
-    vectors: [
-      { name: 'visual', dims: 1536 },
-      { name: 'audio', dims: 1536 },
-      { name: 'transcript', dims: 1536 },
-      { name: 'caption', dims: 1536 },
-    ],
-    stages: [
-      ['Transcription', 'Gemini Flash-Lite'],
-      ['Media embedding', 'Gemini Embedding 2'],
-      ['Text embedding', 'Gemini Embedding 2'],
-      ['Caption', 'Gemini Flash-Lite / GPT / Cosmos'],
-      ['Verification', 'Gemini Flash-Lite / GPT / Cosmos'],
-      ['Reranker', 'Qwen3-VL-Reranker-2B (local, optional)'],
-    ],
-  },
-  {
     id: 'self-hosted',
-    label: 'Self-hosted',
-    blurb: 'Everything on this machine. No keys, needs model downloads and a GPU.',
+    label: 'Self-Hosted Local AI Engine',
+    blurb: 'Full multimodal pipeline executing on local CPU/GPU with Qdrant vector storage.',
     icon: Server,
     vectors: [
       { name: 'visual', dims: 512 },
@@ -55,12 +34,12 @@ const PROFILES = [
       { name: 'caption', dims: 1024 },
     ],
     stages: [
-      ['Transcription', 'faster-whisper-small'],
-      ['Media embedding', 'X-CLIP + CLAP'],
-      ['Text embedding', 'BAAI/bge-m3'],
-      ['Caption', 'Qwen2.5-VL-3B (optional)'],
-      ['Verification', 'Disabled'],
-      ['Reranker', 'Qwen3-VL-Reranker-2B (optional)'],
+      ['Transcription', 'Whisper (faster-whisper-small)'],
+      ['Media embedding', 'X-CLIP (visual) + CLAP (audio)'],
+      ['Text embedding', 'BAAI / BGE-M3 (multilingual)'],
+      ['Captioning & VLM', 'Qwen2.5-VL-3B-Instruct'],
+      ['Vector Store', 'Qdrant (Local Docker / In-Memory)'],
+      ['Reranker', 'Qwen3-VL-Reranker-2B'],
     ],
   },
 ] as const
@@ -228,9 +207,6 @@ export function Developer() {
   const [deployment, setDeployment] = useDeployment()
   const [qdrantTarget, setQdrantTarget] = useQdrantTarget()
 
-  const providers = Array.from(
-    new Set([providerOf(queryModel, QUERY_MODELS), providerOf(indexModel, INDEX_MODELS)]),
-  )
   const profile = PROFILES.find((item) => item.id === deployment) ?? PROFILES[0]
 
   return (
@@ -376,17 +352,11 @@ export function Developer() {
           </Panel>
 
           <Panel
-            title={t.apiKeysLabel}
-            hint={t.apiKeysHint}
+            title="Local Execution Status"
+            hint="Self-hosted architecture is active. No external cloud API keys are required."
           >
-            <div className="space-y-3">
-              {providers.map((provider) => (
-                <KeyField
-                  key={provider}
-                  provider={provider}
-                  label={provider === 'openai' ? 'OpenAI API key' : 'Gemini API key'}
-                />
-              ))}
+            <div className="rounded-xl border border-white/10 bg-ink-800/60 p-4 text-xs text-paper-300/80">
+              <span className="font-semibold text-paper-100">All models running locally:</span> Whisper, X-CLIP, CLAP, BGE-M3, Qwen-VL, Qdrant.
             </div>
           </Panel>
         </div>
