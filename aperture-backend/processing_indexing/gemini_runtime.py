@@ -176,9 +176,11 @@ def classify_gemini_error(exc: BaseException, *, attempt: int | None = None) -> 
 class GeminiRetryPolicy:
     """Bounded exponential backoff used for quota and transport errors only."""
 
-    max_attempts: int = 3
-    initial_delay_seconds: float = 1.0
-    max_delay_seconds: float = 8.0
+    # Free-tier quotas are per minute, so a 429 needs to wait long enough for
+    # the window to roll over: 2s, 4s, 8s, 16s, 20s before giving up.
+    max_attempts: int = 6
+    initial_delay_seconds: float = 2.0
+    max_delay_seconds: float = 20.0
 
     def __post_init__(self) -> None:
         if self.max_attempts < 1:
@@ -422,10 +424,21 @@ class GoogleGenAIRuntime:
         uploads: list[Any] = []
         try:
             contents: Any = prompt
+            parts: list[Any] = []
             for path, mime_type in media:
-                uploads.append(self._upload_file(client, types, path, mime_type))
-            if uploads:
-                contents = [prompt, *uploads]
+                # Small clips (window videos, audio chunks) go inline: one
+                # request instead of upload + wait-for-ACTIVE + delete, which
+                # dominated per-window caption latency.  Large files still
+                # use the Files API, whose limit is far higher.
+                inline = self._inline_part(types, path, mime_type)
+                if inline is not None:
+                    parts.append(inline)
+                    continue
+                upload = self._upload_file(client, types, path, mime_type)
+                uploads.append(upload)
+                parts.append(upload)
+            if parts:
+                contents = [prompt, *parts]
             config = _generate_config(types, response_schema=response_schema)
             response = client.models.generate_content(
                 model=model,
@@ -470,6 +483,22 @@ class GoogleGenAIRuntime:
         config = config_type(mime_type=mime_type) if config_type is not None else {"mime_type": mime_type}
         upload = client.files.upload(file=str(path), config=config)
         return self._await_active_upload(client, upload)
+
+    # Inline request bodies are capped at 20 MB in total; stay well under it.
+    INLINE_MEDIA_MAX_BYTES = 12 * 1024 * 1024
+
+    @classmethod
+    def _inline_part(cls, types: Any, path: Path, mime_type: str) -> Any | None:
+        part_type = getattr(types, "Part", None)
+        from_bytes = getattr(part_type, "from_bytes", None)
+        if from_bytes is None:
+            return None
+        try:
+            if path.stat().st_size > cls.INLINE_MEDIA_MAX_BYTES:
+                return None
+            return from_bytes(data=path.read_bytes(), mime_type=mime_type)
+        except (OSError, TypeError):
+            return None
 
     def _await_active_upload(
         self,

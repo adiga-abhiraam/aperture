@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { Film, Layers, UploadCloud } from 'lucide-react'
+import { Film, Layers, Upload } from 'lucide-react'
 import { PageShell } from '../components/PageShell'
-import { ConnectorGrid } from '../components/ConnectorGrid'
 import { StageSequence } from '../components/StageSequence'
 import { INDEX_STAGES } from '../lib/stages'
 import { runIndex, SearchApiError, type IndexResponse, type IndexWindow } from '../lib/api'
@@ -211,7 +210,7 @@ export function Preprocess() {
               dragActive ? 'border-glow bg-glow/5' : 'border-white/15 bg-ink-900/50'
             }`}
           >
-            <UploadCloud size={24} className={dragActive ? 'text-glow' : 'text-paper-300/50'} />
+            <Upload size={24} className={dragActive ? 'text-glow' : 'text-paper-300/50'} />
             <p className="text-sm text-paper-100">
               {file ? file.name : t.uploadLongForm}
             </p>
@@ -234,26 +233,15 @@ export function Preprocess() {
         />
 
 
-        <div className="mt-3">
-          <ConnectorGrid strings={t} onError={setError} />
-        </div>
-
         <button
           type="button"
           onClick={start}
           disabled={!file || busy}
-          className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl bg-glow px-4 py-3 text-sm font-medium text-black transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-30"
+          className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-glow px-4 py-3 text-sm font-medium text-black transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-30"
         >
           <Layers size={15} />
           {busy ? t.indexingNow : t.startIndexing}
         </button>
-
-        {!file && (
-          <p className="mt-2 text-center text-[11px] text-paper-300/40">
-            This button indexes an uploaded file. To index footage already in Drive, use
-            &ldquo;Index these videos&rdquo; in the connector above.
-          </p>
-        )}
 
         {busy && (
           <div className="mt-4">
@@ -282,8 +270,7 @@ export function Preprocess() {
                 <p className="mt-2 text-sm leading-relaxed text-paper-300/70">{result.summary}</p>
               )}
               <p className="mt-3 font-mono text-[10px] text-paper-300/40">
-                {result.model} · {result.provider}
-                {result.frames_sampled > 0 ? ` · ${result.frames_sampled} frames sampled` : ''}
+                {result.frames_sampled > 0 ? `${result.frames_sampled} frames sampled` : 'Indexed'}
                 {result.duration_seconds ? ` · ${result.duration_seconds}s source` : ''}
               </p>
             </div>

@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 # uvicorn launched from the repo root). Real environment variables set
 # externally still take precedence - load_dotenv doesn't override existing
 # os.environ entries by default.
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 load_dotenv(Path(__file__).parent / ".env")
 
 

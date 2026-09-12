@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { UploadCloud } from 'lucide-react'
+import { Upload } from 'lucide-react'
 import { useUploads } from '../lib/uploads'
 import { UploadFileRow } from './UploadFileRow'
 
@@ -31,7 +31,7 @@ export function UploadDropzone() {
           dragActive ? 'border-glow' : 'border-white/15'
         }`}
       >
-        <UploadCloud size={40} className={dragActive ? 'text-glow' : 'text-paper-300/50'} />
+        <Upload size={40} className={dragActive ? 'text-glow' : 'text-paper-300/50'} />
         <p className="text-base text-paper-100">Drag and drop videos here, or click to browse</p>
         <p className="text-sm text-paper-300/40">MP4, MOV, AVI · up to 2GB per file</p>
         <input

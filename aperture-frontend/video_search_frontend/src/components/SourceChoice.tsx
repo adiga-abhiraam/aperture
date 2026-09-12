@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { Film, Library, Search, UploadCloud, X } from 'lucide-react'
+import { Film, Library, Search, Upload, X } from 'lucide-react'
 import { formatBytes } from '../lib/format'
 import type { Strings } from '../lib/i18n'
 
@@ -61,7 +61,7 @@ export function SourceChoice({
               : 'border-white/10 bg-ink-800/60 text-paper-300/70 hover:border-white/25 hover:text-paper-100'
           }`}
         >
-          <UploadCloud size={16} />
+          <Upload size={16} />
           {t.uploadFootage}
         </button>
         <button
@@ -123,7 +123,7 @@ export function SourceChoice({
                 dragActive ? 'border-glow bg-glow/5' : 'border-white/15 bg-ink-800/40'
               }`}
             >
-              <UploadCloud size={22} className={dragActive ? 'text-glow' : 'text-paper-300/50'} />
+              <Upload size={22} className={dragActive ? 'text-glow' : 'text-paper-300/50'} />
               <p className="text-sm text-paper-100">{t.dropHint}</p>
               <p className="text-xs text-paper-300/40">{t.fileHint}</p>
             </div>

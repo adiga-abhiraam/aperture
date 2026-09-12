@@ -7,9 +7,9 @@ import { LanguageSelect } from './LanguageSelect'
 const LINKS = [
   { path: '/', key: 'navQuery' as const },
   { path: '/how-it-works', key: 'navHowItWorks' as const },
+  { path: '/dashboard', key: 'navDashboard' as const },
   { path: '/preprocess', key: 'navUpload' as const },
   { path: '/design', key: 'navDesign' as const },
-  { path: '/developer', key: 'navDeveloper' as const },
 ]
 
 export function Nav() {
@@ -38,7 +38,7 @@ export function Nav() {
               href={link.path}
               onClick={go(link.path)}
               className={`whitespace-nowrap text-sm font-medium transition-colors hover:text-white ${
-                pathname === link.path ? 'text-white' : 'text-white/70'
+                pathname === link.path || (link.path === '/dashboard' && pathname.startsWith('/videos/')) ? 'text-white' : 'text-white/70'
               }`}
             >
               {t[link.key]}
@@ -55,7 +55,7 @@ export function Nav() {
         </div>
 
         <div className="mt-3 grid grid-cols-3 gap-1 border-t border-white/10 pt-3 md:hidden">
-          {LINKS.filter((link) => ['/', '/how-it-works', '/preprocess'].includes(link.path)).map((link) => (
+          {LINKS.filter((link) => ['/', '/dashboard', '/preprocess'].includes(link.path)).map((link) => (
             <a
               key={link.path}
               href={link.path}
