@@ -33,6 +33,7 @@ import {
   type UiStatus,
 } from '../lib/jobs'
 import { formatBytes } from '../lib/format'
+import { formatElapsed, useLiveElapsed } from '../lib/useLiveElapsed'
 
 const POLL_ACTIVE_MS = 1500
 const POLL_IDLE_MS = 8000
@@ -86,6 +87,7 @@ function VideoCard({
   const m = job.metadata ?? {}
   const percent = Math.round(Math.max(0, Math.min(1, job.progress)) * 100)
   const active = status === 'processing' || status === 'queued'
+  const liveElapsed = useLiveElapsed(job.processing_seconds, active)
 
   return (
     <article className="liquid-glass group flex flex-col overflow-hidden rounded-2xl border border-white/10 bg-ink-900/70 transition-colors hover:border-white/20">
@@ -154,7 +156,7 @@ function VideoCard({
             </div>
             <p className="mt-1.5 font-mono text-[10px] text-paper-300/50">
               {job.total_windows > 0 ? `${Math.min(job.total_windows, Math.round(job.progress * job.total_windows))}/${job.total_windows} windows · ` : ''}
-              running {formatSeconds(job.processing_seconds)}
+              running {formatElapsed(liveElapsed)}
             </p>
           </div>
         ) : (

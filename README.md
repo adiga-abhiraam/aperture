@@ -50,7 +50,9 @@ Opens the UI at `http://127.0.0.1:3000` and the API at `http://127.0.0.1:8000` (
    
    Both engines use 10 s windows. *Fast* tiles the video (18 windows for a 3-minute clip); *Precise* steps every 5 s (twice the calls, finer matches). On the Cloud API every window gets its own scene description.
 2. Cards show live stage + progress while processing, and afterwards the measured **upload time**, **processing time** and indexed window count. **Stop** cancels between model calls; **Delete** removes the file, artifacts, chat history and the video's vectors.
-3. Clicking a card opens the watch page. The chat answers from that video's transcript and per-window scene descriptions; every `[mm:ss]` in an answer seeks the player. If those notes can't answer (e.g. a question about sound), the model watches the footage itself — the reply is tagged *Watched the footage* — and only says *not found in this video* when neither can answer.
+3. Clicking a card opens the watch page. The chat answers from that video's transcript, per-window scene descriptions and detected **sound events** (sirens, horns, alarms, crashes… each with the exact second it starts); every `[mm:ss]` in an answer seeks the player and each citation shows the cited frame. If those notes can't answer, the model watches the footage itself — the reply is tagged *Watched the footage* — and only says *not found in this video* when neither can answer. The footage is uploaded to Gemini once per video (pre-warmed when the page opens) so follow-up questions take a few seconds.
+4. **Find this** — attach a photo (or paste a screenshot) in the chat: the model first describes the subject in detail (*Looking for: red motorcycle — bright red tank, rectangular headlight…*), then finds that exact item in the footage even when look-alikes are present.
+5. **Results** (tab next to the chat) collects every moment the answers cited: thumbnail, timestamp, evidence, and **Clip ↓** (MP4 around the moment) / **Frame ↓** (JPEG) downloads, plus **Export CSV** for the whole list.
 
 ## Where data lives (nothing is lost on restart)
 
@@ -77,7 +79,14 @@ API_CLIP_FPS=6
 
 Clips and audio chunks under 12 MB are sent inline with the request rather than through the Files API (no upload → wait → delete round trip). Reference: the 3-minute demo clip processes in about 90 s with all 19 windows captioned.
 
-Rate-limit (429) responses are retried with backoff up to ~50 s total. If you hit quota often, lower the concurrency or add keys to `GEMINI_API_KEYS_JSON`.
+Rate-limit (429) responses are retried with backoff up to ~50 s total. To avoid hitting them at all, add several free keys to `GEMINI_API_KEYS_JSON` (JSON array): jobs rotate through the pool and **pace each key** at `GEMINI_PER_KEY_RPM` requests per minute (default 12, below the free-tier limit; `0` disables pacing). 14 keys process a 24-minute video in about 5 minutes with no dropped captions.
+
+```
+GEMINI_API_KEYS_JSON=["key1","key2",...]
+GEMINI_PER_KEY_RPM=12
+CHAT_VIDEO_FALLBACK_MAX_MB=200      # largest video the chat will send to the model whole
+CHAT_VIDEO_FALLBACK_MAX_MINUTES=40
+```
 
 ## API surface used by the UI
 
@@ -87,7 +96,8 @@ Rate-limit (429) responses are retried with backoff up to ~50 s total. If you hi
 | Upload | `POST /api/processing/jobs` (multipart `video` + `configuration` JSON; header `X-Upload-Started-Ms` records upload time) |
 | Process / Stop / Delete | `POST …/{id}/start`, `POST …/{id}/cancel`, `DELETE …/{id}` |
 | Watch page | `GET …/{id}`, `GET …/{id}/video` (range requests), `GET …/{id}/windows`, `GET …/{id}/thumbnail` |
-| Chat | `GET/POST/DELETE …/{id}/chat` |
+| Chat | `GET/POST/DELETE …/{id}/chat`; `POST …/{id}/chat/ask` (multipart `question` + optional `image`); `POST …/{id}/chat/warm` (pre-upload footage); `GET …/{id}/chat/images/{name}` |
+| Results | `GET …/{id}/frame/{seconds}` (`?download=1` for a file), `GET …/{id}/clip?start=&end=` (MP4, ≤120 s) |
 | Cloud session (keys stay server-side) | `GET /api/runtime/env-session` |
 
 ## Tech Stack

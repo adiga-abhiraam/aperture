@@ -830,6 +830,13 @@ class JobManager:
         gemini_key = runtime.get("gemini_api_key")
         if not isinstance(gemini_key, str) or not gemini_key.strip():
             raise ValueError("The active API session does not contain a Gemini API key")
+        pool_keys = _env_gemini_key_pool(gemini_key)
+        if pool_keys:
+            self._activity(
+                job,
+                "gemini_api",
+                f"Rotating {len(pool_keys) + 1} Gemini API keys from GEMINI_API_KEYS_JSON",
+            )
 
         models = dict(runtime.get("models") or {})
         embedding_model = str(models.get("media_embedding") or "gemini-embedding-2")
@@ -906,6 +913,7 @@ class JobManager:
         bundle = build_gemini_api_pipeline(
             GeminiApiPipelineFactoryConfig(
                 gemini_api_key=gemini_key,
+                gemini_api_keys=pool_keys,
                 embedding_model=embedding_model,
                 embedding_dimensions=contract.dimensions,
                 generation_model=generation_model,
@@ -1022,6 +1030,7 @@ class JobManager:
                     "vlm_call_state": "direct" if payload.get("caption_direct") else "inherited" if caption else "unavailable",
                     "caption": caption,
                     "caption_evidence": list(payload.get("caption_evidence") or []),
+                    "sound_events": list(payload.get("sound_events") or []),
                     "has_audio": bool(payload.get("has_audio")),
                     "provenance": "direct" if payload.get("caption_direct") else "inherited" if payload.get("caption_inherited") else "unavailable",
                     "confidence": float(payload.get("caption_confidence") or 0),
@@ -1769,6 +1778,26 @@ class JobManager:
         (exports / "processing_report.json").write_text(
             json.dumps(sanitize(job.report), indent=2), encoding="utf-8"
         )
+
+
+def _env_gemini_key_pool(session_key: str) -> tuple[str, ...]:
+    """Extra keys from ``GEMINI_API_KEYS_JSON`` for a session that uses the
+    backend's own key.  A key the browser supplied is never widened with the
+    server's keys, so those users only ever spend their own quota."""
+
+    raw = os.environ.get("GEMINI_API_KEYS_JSON", "").strip()
+    if not raw or raw == "[]":
+        return ()
+    try:
+        from .gemini_runtime import parse_gemini_keys_json
+
+        keys = parse_gemini_keys_json(raw)
+    except Exception:  # noqa: BLE001 - a bad pool just means no rotation
+        return ()
+    env_single = os.environ.get("GEMINI_API_KEY", "").strip()
+    if session_key not in keys and session_key != env_single:
+        return ()
+    return tuple(key for key in keys if key != session_key)
 
 
 def _vector_summary(vector):

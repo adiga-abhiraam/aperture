@@ -18,6 +18,7 @@ import re
 import threading
 import time
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,33 @@ _ANSWER_SCHEMA: Mapping[str, Any] = {
 }
 
 
+# What the model extracts from a reference photo before the footage is
+# searched.  ``search_query`` is the phrasing used to look the subject up in
+# the transcript/caption evidence; the rest is shown back to the user.
+_REFERENCE_SCHEMA: Mapping[str, Any] = {
+    "type": "object",
+    "properties": {
+        "subject": {"type": "string"},
+        "description": {"type": "string"},
+        "distinguishing_marks": {"type": "array", "items": {"type": "string"}},
+        "search_query": {"type": "string"},
+    },
+    "required": ["subject", "description", "distinguishing_marks", "search_query"],
+}
+
+# Image types the chat accepts as a reference photo, keyed by suffix.
+IMAGE_MIME: Mapping[str, str] = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".bmp": "image/bmp",
+}
+MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024
+DEFAULT_IMAGE_QUESTION = "When does this appear in the video, and what happens to it?"
+
+
 class VideoChatError(RuntimeError):
     """A user-facing chat failure that carries no credentials."""
 
@@ -81,6 +109,44 @@ def env_gemini_runtime() -> GoogleGenAIRuntime:
             "No Gemini API key is configured. Set GEMINI_API_KEY (or GEMINI_API_KEYS_JSON) in .env."
         )
     return GoogleGenAIRuntime(api_key=key)
+
+
+_FOOTAGE_RUNTIME: GoogleGenAIRuntime | None = None
+_FOOTAGE_RUNTIME_LOCK = threading.Lock()
+
+
+def env_footage_runtime() -> GoogleGenAIRuntime:
+    """The runtime that watches whole videos: one process-wide instance on a
+    single key, so its upload cache is shared by every question and page load.
+
+    Uploaded files belong to the key that uploaded them, which is why this
+    does not rotate through the pool like the light-weight calls do."""
+
+    global _FOOTAGE_RUNTIME
+    with _FOOTAGE_RUNTIME_LOCK:
+        if _FOOTAGE_RUNTIME is None:
+            key = os.environ.get("GEMINI_API_KEY", "").strip()
+            if not key:
+                pool_raw = os.environ.get("GEMINI_API_KEYS_JSON", "").strip()
+                try:
+                    key = parse_gemini_keys_json(pool_raw)[0] if pool_raw and pool_raw != "[]" else ""
+                except Exception:  # noqa: BLE001 - reported below
+                    key = ""
+            if not key:
+                raise VideoChatError(
+                    "No Gemini API key is configured. Set GEMINI_API_KEY (or GEMINI_API_KEYS_JSON) in .env."
+                )
+            _FOOTAGE_RUNTIME = GoogleGenAIRuntime(api_key=key, reuse_uploads=True)
+        return _FOOTAGE_RUNTIME
+
+
+def warm_footage(video_path: Path | None, duration_seconds: float) -> bool:
+    """Upload the video ahead of the first question; True when it is ready."""
+
+    mime = _video_fallback_allowed(video_path, duration_seconds)
+    if mime is None or video_path is None:
+        return False
+    return env_footage_runtime().warm_media(video_path, mime)
 
 
 def format_timestamp(seconds: float) -> str:
@@ -128,9 +194,31 @@ def _lines_for_windows(windows: Sequence[Mapping[str, Any]]) -> list[tuple[int, 
             evidence = [str(item).strip() for item in (row.get("caption_evidence") or []) if str(item).strip()]
             detail = f" (details: {'; '.join(evidence[:8])})" if evidence else ""
             parts.append(f"scene: {caption}{detail}")
+        sounds = _sound_lines(row)
+        if sounds:
+            parts.append("sounds: " + "; ".join(sounds))
         if not parts:
             continue
         lines.append((index, start, f"[{format_timestamp(start)}-{format_timestamp(end)}] " + " | ".join(parts)))
+    return lines
+
+
+def _sound_lines(row: Mapping[str, Any]) -> list[str]:
+    """'police siren at 03:12-03:20' for each labelled sound in a window."""
+
+    lines: list[str] = []
+    for event in row.get("sound_events") or []:
+        if not isinstance(event, Mapping):
+            continue
+        label = str(event.get("label") or "").strip()
+        if not label:
+            continue
+        try:
+            start = float(event.get("start", 0.0))
+            end = float(event.get("end", start))
+        except (TypeError, ValueError):
+            continue
+        lines.append(f"{label} at {format_timestamp(start)}-{format_timestamp(end)}")
     return lines
 
 
@@ -176,6 +264,39 @@ def build_context(windows: Sequence[Mapping[str, Any]], question: str, *, budget
     return "\n".join(line[2] for line in lines)
 
 
+def _history_block(history: Sequence[Mapping[str, Any]]) -> str:
+    """Render recent turns; a turn that carried a photo keeps its description
+    so follow-ups like "and the other one?" still know what was shown."""
+
+    turns = []
+    for message in list(history)[-MAX_HISTORY_TURNS:]:
+        role = "User" if message.get("role") == "user" else "Assistant"
+        content = str(message.get("content") or "").strip()
+        reference = message.get("reference")
+        if isinstance(reference, Mapping) and reference.get("description"):
+            content = f"{content} (attached photo: {str(reference.get('description')).strip()})".strip()
+        turns.append(f"{role}: {content}")
+    return "\n".join(turns) if turns else "(no earlier messages)"
+
+
+def _reference_block(reference: Mapping[str, Any] | None) -> str:
+    if not reference:
+        return ""
+    marks = [str(item).strip() for item in (reference.get("distinguishing_marks") or []) if str(item).strip()]
+    lines = [
+        "The user attached a reference photo. It shows this exact subject:",
+        f"- Subject: {str(reference.get('subject') or '').strip()}",
+        f"- Description: {str(reference.get('description') or '').strip()}",
+    ]
+    if marks:
+        lines.append(f"- Distinguishing marks: {'; '.join(marks)}")
+    lines.append(
+        "Other similar-looking people, objects or vehicles may appear; only report the one "
+        "that matches these marks, and say when you are not sure it is the same one."
+    )
+    return "\n".join(lines) + "\n\n"
+
+
 def _prompt(
     *,
     title: str,
@@ -183,12 +304,9 @@ def _prompt(
     context: str,
     history: Sequence[Mapping[str, str]],
     question: str,
+    reference: Mapping[str, Any] | None = None,
 ) -> str:
-    turns = []
-    for message in list(history)[-MAX_HISTORY_TURNS:]:
-        role = "User" if message.get("role") == "user" else "Assistant"
-        turns.append(f"{role}: {str(message.get('content') or '').strip()}")
-    history_block = "\n".join(turns) if turns else "(no earlier messages)"
+    history_block = _history_block(history)
     return (
         "You are the assistant for one specific video. Answer the user's question using ONLY the "
         "time-stamped evidence below, which was extracted from the video (speech transcript and "
@@ -198,12 +316,16 @@ def _prompt(
         "Rules:\n"
         "- Be concise and direct. Plain text only, no markdown headings.\n"
         "- Whenever you refer to a moment, cite it inline as [mm:ss] using the start time of the "
-        "evidence line you used, and also list it in `citations`.\n"
+        "evidence line you used, and also list it in `citations`. For a sound event, cite the "
+        "second the sound itself starts (from its own 'at mm:ss' time), not the window start.\n"
+        "- 'sounds:' entries are non-speech sounds detected in the audio (sirens, horns, "
+        "alarms, crashes, screams...). Use them to answer questions about what was heard.\n"
         "- If the evidence does not contain the answer, say so plainly and set found_in_video to "
         "false. Never invent details that are not in the evidence.\n"
         "- For summaries or 'what happens' questions, walk through the video in order with a few "
         "timestamps.\n\n"
         f"Evidence:\n{context if context else '(no transcript or scene descriptions were produced for this video)'}\n\n"
+        f"{_reference_block(reference)}"
         f"Conversation so far:\n{history_block}\n\n"
         f"User: {question.strip()}"
     )
@@ -228,9 +350,38 @@ def _nearest_window(windows: Sequence[Mapping[str, Any]], seconds: float) -> Map
     return best
 
 
+def _sound_at(window: Mapping[str, Any], seconds: float, tolerance: float = 1.5) -> Mapping[str, Any] | None:
+    """The window's detected sound whose start is within ``tolerance`` of ``seconds``."""
+
+    best: Mapping[str, Any] | None = None
+    best_distance = tolerance
+    for event in window.get("sound_events") or []:
+        if not isinstance(event, Mapping) or not event.get("label"):
+            continue
+        try:
+            distance = abs(float(event.get("start", 0.0)) - seconds)
+        except (TypeError, ValueError):
+            continue
+        if distance <= best_distance:
+            best, best_distance = event, distance
+    return best
+
+
 def _citations(
-    payload: Mapping[str, Any], answer: str, windows: Sequence[Mapping[str, Any]], duration: float
+    payload: Mapping[str, Any],
+    answer: str,
+    windows: Sequence[Mapping[str, Any]],
+    duration: float,
+    *,
+    exact: bool = False,
 ) -> list[dict[str, Any]]:
+    """Citations the player can seek to.
+
+    Evidence-based answers cite window starts, so each citation is the window.
+    When the model watched the footage itself (``exact``) its timestamps are
+    the real second the thing happens, so the seek target keeps that second
+    and the window only lends its description.
+    """
     seconds_list: list[tuple[float, str]] = []
     for item in payload.get("citations") or []:
         if not isinstance(item, Mapping):
@@ -256,23 +407,33 @@ def _citations(
         window = _nearest_window(windows, seconds)
         if window is None:
             continue
-        key = int(window.get("index", int(seconds)))
+        # A cited second that lines up with a detected sound is the sound's
+        # own start: keep it exact and label the citation as something heard.
+        sound = _sound_at(window, seconds)
+        precise = exact or sound is not None
+        key = int(seconds) if precise else int(window.get("index", int(seconds)))
         if key in seen:
             continue
         seen.add(key)
-        start = float(window.get("start", seconds))
+        start = max(0.0, seconds) if precise else float(window.get("start", seconds))
         transcript = str(window.get("transcript") or "").strip()
         caption = str(window.get("caption") or "").strip()
-        snippet = reason.strip() or transcript or caption
+        snippet = reason.strip() or (sound["label"] if sound else "") or transcript or caption
+        if sound is not None:
+            kind = "audio"
+        elif transcript and (not caption or transcript in snippet):
+            kind = "transcript"
+        else:
+            kind = "visual"
         citations.append(
             {
                 "window_id": window.get("window_id"),
-                "window_index": key,
+                "window_index": int(window.get("index", 0)),
                 "start": start,
-                "end": float(window.get("end", start)),
+                "end": float(sound["end"]) if sound is not None else float(window.get("end", start)),
                 "label": format_timestamp(start),
                 "snippet": snippet[:240],
-                "kind": "transcript" if transcript and (not caption or transcript in snippet) else "visual",
+                "kind": kind,
             }
         )
     citations.sort(key=lambda item: item["start"])
@@ -316,16 +477,27 @@ def _video_fallback_allowed(video_path: Path | None, duration_seconds: float) ->
     return mime
 
 
-def _video_prompt(*, title: str, duration_seconds: float, history: Sequence[Mapping[str, str]], question: str) -> str:
-    turns = []
-    for message in list(history)[-MAX_HISTORY_TURNS:]:
-        role = "User" if message.get("role") == "user" else "Assistant"
-        turns.append(f"{role}: {str(message.get('content') or '').strip()}")
-    history_block = "\n".join(turns) if turns else "(no earlier messages)"
+def _video_prompt(
+    *,
+    title: str,
+    duration_seconds: float,
+    history: Sequence[Mapping[str, str]],
+    question: str,
+    reference: Mapping[str, Any] | None = None,
+) -> str:
+    history_block = _history_block(history)
+    attachments = (
+        "Attached files, in order: 1. the video to search (every timestamp refers to it); "
+        "2. the user's reference photo.\n"
+        if reference
+        else ""
+    )
     return (
         "Watch the attached video and answer the user's question about it.\n"
+        f"{attachments}"
         f"Video title: {title}\n"
         f"Video length: {format_timestamp(duration_seconds)}\n\n"
+        f"{_reference_block(reference)}"
         "Rules:\n"
         "- Be concise and direct. Plain text only, no markdown headings.\n"
         "- Whenever you refer to a moment, cite it inline as [mm:ss] measured from the "
@@ -335,6 +507,51 @@ def _video_prompt(*, title: str, duration_seconds: float, history: Sequence[Mapp
         f"Conversation so far:\n{history_block}\n\n"
         f"User: {question.strip()}"
     )
+
+
+def _reference_prompt(question: str) -> str:
+    return (
+        "The user attached this photo to find its subject inside surveillance or archive "
+        "footage that may contain other similar-looking people, objects or vehicles. "
+        "Describe only the main subject, ignoring the background, in enough detail that "
+        "someone could pick it out from look-alikes: type, colours, shape, size cues, "
+        "materials, clothing, text, labels, stickers, logos, number plates, damage or wear. "
+        "`subject` is a short noun phrase (e.g. 'blue steel water bottle', 'white hatchback'). "
+        "`description` is 2-3 plain sentences. `distinguishing_marks` lists 3-8 short phrases "
+        "for the details that separate it from similar items (colour, shape, cap, label, "
+        "sticker, logo, plate, dent, scratch); never list the background, the surface it is "
+        "on, or what is being done to it, since those may differ in the footage. Include any "
+        "readable text or plate exactly as written. `search_query` is one line of keywords for "
+        "finding it in scene descriptions. Do not guess brands or identities you cannot see.\n"
+        f"The user's question about the footage: {question.strip() or DEFAULT_IMAGE_QUESTION}"
+    )
+
+
+def describe_reference_image(
+    image: tuple[Path, str],
+    *,
+    question: str,
+    runtime: GoogleGenAIRuntime,
+    model: str,
+) -> dict[str, Any]:
+    """Turn a reference photo into a detailed, search-ready description."""
+
+    path, mime = image
+    payload, _diagnostics = runtime.generate_json(
+        model=model,
+        prompt=_reference_prompt(question),
+        media_path=path,
+        media_mime_type=mime,
+        response_schema=_REFERENCE_SCHEMA,
+        operation_name="video_chat_describe_reference",
+    )
+    marks = [str(item).strip() for item in (payload.get("distinguishing_marks") or []) if str(item).strip()]
+    return {
+        "subject": str(payload.get("subject") or "").strip()[:120],
+        "description": str(payload.get("description") or "").strip()[:1200],
+        "distinguishing_marks": marks[:8],
+        "search_query": str(payload.get("search_query") or "").strip()[:300],
+    }
 
 
 def answer_question(
@@ -347,54 +564,102 @@ def answer_question(
     runtime: GoogleGenAIRuntime | None = None,
     model: str | None = None,
     video_path: Path | None = None,
+    reference_image: tuple[Path, str] | None = None,
+    footage_runtime: GoogleGenAIRuntime | None = None,
 ) -> dict[str, Any]:
+    if reference_image is not None and not question.strip():
+        question = DEFAULT_IMAGE_QUESTION
     if not question.strip():
         raise VideoChatError("Ask a question about the video.")
     if len(question) > 2000:
         raise VideoChatError("Keep questions under 2000 characters.")
     started = time.perf_counter()
     runtime = runtime or env_gemini_runtime()
+    # Whole-video calls go through the upload-caching runtime when one is
+    # configured; tests and callers without one keep a single runtime.
+    footage_runtime = footage_runtime or runtime
     model_name = (model or chat_model_name()).strip()
-    context = build_context(windows, question)
-    payload, diagnostics = runtime.generate_json(
-        model=model_name,
-        prompt=_prompt(
-            title=title,
-            duration_seconds=duration_seconds,
-            context=context,
-            history=history,
-            question=question,
-        ),
-        response_schema=_ANSWER_SCHEMA,
-        operation_name="video_chat",
-    )
-    answer = str(payload.get("answer") or "").strip()
-    found = bool(payload.get("found_in_video", True))
-    source = "transcript"
+
+    # A reference photo is first turned into words: the description is shown
+    # back to the user, steers the evidence lookup, and tells the model which
+    # of several look-alikes to report when it watches the footage.
+    reference: dict[str, Any] | None = None
+    if reference_image is not None:
+        reference = describe_reference_image(
+            reference_image, question=question, runtime=runtime, model=model_name
+        )
+
+    lookup = f"{question} {reference['search_query']}" if reference else question
+    context = build_context(windows, lookup)
+
+    def ask_evidence():
+        return runtime.generate_json(
+            model=model_name,
+            prompt=_prompt(
+                title=title,
+                duration_seconds=duration_seconds,
+                context=context,
+                history=history,
+                question=question,
+                reference=reference,
+            ),
+            response_schema=_ANSWER_SCHEMA,
+            operation_name="video_chat",
+        )
+
+    def watch_footage(mime: str):
+        return footage_runtime.generate_json(
+            model=model_name,
+            prompt=_video_prompt(
+                title=title,
+                duration_seconds=duration_seconds,
+                history=history,
+                question=question,
+                reference=reference,
+            ),
+            media_path=video_path,
+            media_mime_type=mime,
+            extra_media=[reference_image] if reference_image is not None else None,
+            response_schema=_ANSWER_SCHEMA,
+            operation_name="video_chat_watch",
+        )
 
     # The transcript and captions are a compressed view of the video.  When
     # they cannot answer, let the model look at the footage itself (bounded
     # by size/length so a long archive never gets uploaded per question).
+    # Captions never say which of three similar bottles is *this* one, so a
+    # reference photo always goes to the footage; both calls then run at once
+    # because the footage call is the slow one and does not need the other.
     mime = _video_fallback_allowed(video_path, duration_seconds)
-    if (not found or not answer) and mime is not None:
+    watch_result = None
+    if reference is not None and mime is not None:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            evidence_future = pool.submit(ask_evidence)
+            watch_future = pool.submit(watch_footage, mime)
+            payload, diagnostics = evidence_future.result()
+            try:
+                watch_result = watch_future.result()
+            except Exception:  # noqa: BLE001 - keep the grounded answer if watching fails
+                watch_result = None
+    else:
+        payload, diagnostics = ask_evidence()
+    answer = str(payload.get("answer") or "").strip()
+    found = bool(payload.get("found_in_video", True))
+    source = "transcript"
+
+    if watch_result is None and (not found or not answer) and mime is not None:
         try:
-            payload, diagnostics = runtime.generate_json(
-                model=model_name,
-                prompt=_video_prompt(
-                    title=title, duration_seconds=duration_seconds, history=history, question=question
-                ),
-                media_path=video_path,
-                media_mime_type=mime,
-                response_schema=_ANSWER_SCHEMA,
-                operation_name="video_chat_watch",
-            )
-            video_answer = str(payload.get("answer") or "").strip()
-            if video_answer:
-                answer = video_answer
-                found = bool(payload.get("found_in_video", True))
-                source = "video"
+            watch_result = watch_footage(mime)
         except Exception:  # noqa: BLE001 - keep the grounded answer if watching fails
-            pass
+            watch_result = None
+    if watch_result is not None:
+        video_payload, video_diagnostics = watch_result
+        video_answer = str(video_payload.get("answer") or "").strip()
+        if video_answer:
+            payload, diagnostics = video_payload, video_diagnostics
+            answer = video_answer
+            found = bool(video_payload.get("found_in_video", True))
+            source = "video"
 
     if not answer:
         answer = "I couldn't produce an answer from this video's transcript and scene descriptions."
@@ -402,7 +667,8 @@ def answer_question(
         "answer": answer,
         "found_in_video": found,
         "source": source,
-        "citations": _citations(payload, answer, windows, duration_seconds),
+        "reference": reference,
+        "citations": _citations(payload, answer, windows, duration_seconds, exact=source == "video"),
         "model": model_name,
         "elapsed_seconds": round(time.perf_counter() - started, 3),
         "context_chars": len(context),

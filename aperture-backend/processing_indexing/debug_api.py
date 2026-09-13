@@ -40,7 +40,15 @@ from .library import (
 )
 from .preflight import model_statuses
 from .probe import VideoProbeError
-from .video_chat import ChatHistoryStore, VideoChatError, answer_question
+from .video_chat import (
+    IMAGE_MIME,
+    MAX_REFERENCE_IMAGE_BYTES,
+    ChatHistoryStore,
+    VideoChatError,
+    answer_question,
+    env_footage_runtime,
+    warm_footage,
+)
 from .gemini_runtime import GeminiAuthenticationError, GeminiRuntimeError
 from .openai_runtime import OpenAIRuntimeError
 from .public_demo import (
@@ -503,6 +511,72 @@ def media_response(path, request: Request):
     )
 
 
+def extract_frame_at(video_path: Path, output: Path, seconds: float, ffmpeg: str = "ffmpeg") -> None:
+    """Write one downscaled JPEG frame at ``seconds`` (fast input seek)."""
+    import subprocess
+
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{max(0.0, seconds):.3f}",
+            "-i",
+            str(video_path),
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale='min(480,iw)':-2",
+            "-q:v",
+            "5",
+            str(output),
+        ],
+        check=True,
+        timeout=30,
+    )
+    if not output.is_file() or output.stat().st_size == 0:
+        raise RuntimeError("ffmpeg produced no frame")
+
+
+def extract_clip(video_path: Path, output: Path, start: float, end: float, ffmpeg: str = "ffmpeg") -> None:
+    """Write ``start``-``end`` as an H.264/AAC MP4 (fast preset, streamable)."""
+    import subprocess
+
+    subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{max(0.0, start):.3f}",
+            "-i",
+            str(video_path),
+            "-t",
+            f"{max(0.1, end - start):.3f}",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "23",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            str(output),
+        ],
+        check=True,
+        timeout=180,
+    )
+    if not output.is_file() or output.stat().st_size == 0:
+        raise RuntimeError("ffmpeg produced no clip")
+
+
 def extract_poster_frame(video_path: Path, output: Path, duration: float, ffmpeg: str = "ffmpeg") -> None:
     """Write one downscaled JPEG frame from early in the video."""
     import subprocess
@@ -817,18 +891,41 @@ def clear_chat_history(job_id: str):
     return Response(status_code=204)
 
 
-@app.post("/api/processing/jobs/{job_id}/chat")
-def chat_with_video(job_id: str, body: dict):
-    """Answer one question about this video from its transcript and captions."""
+CHAT_IMAGE_DIR = "chat_images"
 
-    job = job_or_404(job_id)
-    question = str(body.get("question") or "").strip()
-    if not question:
-        raise HTTPException(400, "Ask a question about the video.")
+
+def _store_chat_image(job, upload: UploadFile) -> tuple[Path, str]:
+    """Save a reference photo next to the job so the chat can show it again later."""
+
+    suffix = Path(upload.filename or "").suffix.lower()
+    mime = IMAGE_MIME.get(suffix)
+    if mime is None:
+        # Pasted screenshots arrive as "image.png"/"blob" with only a content type.
+        content_type = (upload.content_type or "").lower()
+        suffix = next((ext for ext, known in IMAGE_MIME.items() if known == content_type), "")
+        mime = IMAGE_MIME.get(suffix)
+    if mime is None:
+        raise HTTPException(400, "Attach a JPEG, PNG, WebP, GIF or BMP image.")
+    data = upload.file.read(MAX_REFERENCE_IMAGE_BYTES + 1)
+    if not data:
+        raise HTTPException(400, "The attached image is empty.")
+    if len(data) > MAX_REFERENCE_IMAGE_BYTES:
+        raise HTTPException(413, "Keep reference images under 10 MB.")
+    folder = job.directory / CHAT_IMAGE_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{int(time.time() * 1000)}{suffix}"
+    path.write_bytes(data)
+    return path, mime
+
+
+def _run_chat(job, question: str, image: UploadFile | None):
+    if not question and image is None:
+        raise HTTPException(400, "Ask a question about the video or attach a photo.")
     if not job.windows:
         if job.status in ("queued", "running"):
             raise HTTPException(409, "This video is still processing. Ask again once it finishes.")
         raise HTTPException(409, "Process this video first so there is a transcript to ask about.")
+    reference_image = _store_chat_image(job, image) if image is not None else None
     history = chat_history.load(job.id, job.directory)
     user_message = {
         "id": f"user-{int(time.time() * 1000)}",
@@ -836,6 +933,10 @@ def chat_with_video(job_id: str, body: dict):
         "content": question,
         "created_at": time.time(),
     }
+    if reference_image is not None:
+        user_message["image_url"] = (
+            f"/api/processing/jobs/{job.id}/chat/images/{reference_image[0].name}"
+        )
     try:
         result = answer_question(
             windows=job.windows,
@@ -844,11 +945,18 @@ def chat_with_video(job_id: str, body: dict):
             question=question,
             history=history,
             video_path=job.video_path,
+            reference_image=reference_image,
+            footage_runtime=_footage_runtime_or_none(),
         )
     except VideoChatError as exc:
         raise HTTPException(400, str(exc))
     except GeminiRuntimeError as exc:
         raise HTTPException(502, f"The chat model could not answer: {exc}")
+    if result.get("reference"):
+        # Kept on the user turn so later prompts can recall what the photo showed.
+        user_message["reference"] = result["reference"]
+    if not question:
+        user_message["content"] = "What happens to this in the video?"
     assistant_message = {
         "id": f"assistant-{int(time.time() * 1000)}",
         "role": "assistant",
@@ -856,12 +964,150 @@ def chat_with_video(job_id: str, body: dict):
         "citations": result["citations"],
         "found_in_video": result["found_in_video"],
         "source": result.get("source", "transcript"),
+        "reference": result.get("reference"),
         "model": result["model"],
         "elapsed_seconds": result["elapsed_seconds"],
         "created_at": time.time(),
     }
     chat_history.append(job.id, job.directory, user_message, assistant_message)
     return {"message": assistant_message}
+
+
+def _footage_runtime_or_none():
+    try:
+        return env_footage_runtime()
+    except VideoChatError:
+        return None
+
+
+_WARMING: set[str] = set()
+_WARMING_LOCK = threading.Lock()
+
+
+@app.post("/api/processing/jobs/{job_id}/chat/warm")
+def warm_chat(job_id: str):
+    """Upload this video to the chat model in the background.
+
+    The watch page calls it on load so the first "watch the footage" answer
+    does not pay the 20-30 s upload-and-process wait in front of the user.
+    """
+
+    job = job_or_404(job_id)
+    duration = float(job.metadata.get("duration") or 0.0)
+    with _WARMING_LOCK:
+        if job.id in _WARMING:
+            return {"warming": True}
+        _WARMING.add(job.id)
+
+    def run() -> None:
+        try:
+            ready = warm_footage(job.video_path, duration)
+            logger.info("Chat footage for job %s %s", job.id, "ready" if ready else "not cached")
+        except Exception as exc:  # noqa: BLE001 - warming is best effort
+            logger.warning("Chat warm-up for job %s failed (%s)", job.id, type(exc).__name__)
+        finally:
+            with _WARMING_LOCK:
+                _WARMING.discard(job.id)
+
+    threading.Thread(target=run, name=f"chat-warm-{job.id}", daemon=True).start()
+    return {"warming": True}
+
+
+@app.post("/api/processing/jobs/{job_id}/chat")
+def chat_with_video(job_id: str, body: dict):
+    """Answer one question about this video from its transcript and captions."""
+
+    job = job_or_404(job_id)
+    return _run_chat(job, str(body.get("question") or "").strip(), None)
+
+
+@app.post("/api/processing/jobs/{job_id}/chat/ask")
+def chat_with_video_multipart(
+    job_id: str, question: str = Form(""), image: UploadFile | None = File(None)
+):
+    """Same as the JSON route, plus an optional reference photo of the thing to find."""
+
+    job = job_or_404(job_id)
+    if image is not None and not (image.filename or image.content_type):
+        image = None
+    return _run_chat(job, question.strip(), image)
+
+
+@app.get("/api/processing/jobs/{job_id}/chat/images/{name}")
+def chat_image(job_id: str, name: str):
+    job = job_or_404(job_id)
+    if "/" in name or "\\" in name or name.startswith("."):
+        raise HTTPException(404, "Image not found")
+    path = job.directory / CHAT_IMAGE_DIR / name
+    mime = IMAGE_MIME.get(path.suffix.lower())
+    if mime is None or not path.is_file():
+        raise HTTPException(404, "Image not found")
+    return FileResponse(path, media_type=mime)
+
+
+def _download_name(job, suffix: str) -> str:
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "_", Path(str(job.metadata.get("filename") or job.title or job.id)).stem).strip("_") or job.id
+    return f"{stem}{suffix}"
+
+
+@app.get("/api/processing/jobs/{job_id}/frame/{seconds}")
+def frame_at(job_id: str, seconds: int, download: bool = False):
+    """One small JPEG frame at a whole second, cached next to the job.
+
+    The chat's citations use it so a judge sees the cited moment without
+    scrubbing: the thumbnail *is* the evidence.  ``download=1`` serves it as
+    an attachment for the results tab.
+    """
+    job = job_or_404(job_id)
+    duration = float(job.metadata.get("duration") or 0)
+    if seconds < 0 or (duration and seconds > duration + 1):
+        raise HTTPException(404, "Frame out of range")
+    folder = job.directory / "frames"
+    path = folder / f"{seconds}.jpg"
+    if not path.is_file():
+        folder.mkdir(parents=True, exist_ok=True)
+        try:
+            extract_frame_at(job.video_path, path, float(seconds))
+        except Exception as exc:  # noqa: BLE001 - a thumbnail is optional
+            logger.warning("Frame %ss for job %s failed (%s)", seconds, job_id, type(exc).__name__)
+            raise HTTPException(404, "Frame unavailable")
+    headers = {"Cache-Control": "public, max-age=86400"}
+    if download:
+        headers["Content-Disposition"] = f'attachment; filename="{_download_name(job, f"_{seconds}s.jpg")}"'
+    return FileResponse(path, media_type="image/jpeg", headers=headers)
+
+
+MAX_CLIP_SECONDS = 120.0
+
+
+@app.get("/api/processing/jobs/{job_id}/clip")
+def clip(job_id: str, start: float, end: float):
+    """Cut ``start``-``end`` out of the upload as a downloadable MP4.
+
+    Re-encoded (not stream-copied) so the cut lands on the exact second the
+    chat cited rather than the previous keyframe; cached next to the job.
+    """
+    job = job_or_404(job_id)
+    duration = float(job.metadata.get("duration") or 0)
+    start = max(0.0, float(start))
+    end = float(end)
+    if duration:
+        end = min(end, duration)
+    if not end > start:
+        raise HTTPException(400, "end must be after start")
+    if end - start > MAX_CLIP_SECONDS:
+        raise HTTPException(400, f"Clips are limited to {int(MAX_CLIP_SECONDS)} seconds")
+    folder = job.directory / "clips"
+    path = folder / f"{start:.1f}-{end:.1f}.mp4"
+    if not path.is_file():
+        folder.mkdir(parents=True, exist_ok=True)
+        try:
+            extract_clip(job.video_path, path, start, end)
+        except Exception as exc:  # noqa: BLE001 - surfaced as a 500 below
+            logger.warning("Clip %.1f-%.1f for job %s failed (%s)", start, end, job_id, type(exc).__name__)
+            raise HTTPException(500, "Could not cut the clip")
+    name = _download_name(job, f"_{int(start)}s-{int(end)}s.mp4")
+    return FileResponse(path, media_type="video/mp4", headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 @app.get("/api/processing/jobs/{job_id}/video")

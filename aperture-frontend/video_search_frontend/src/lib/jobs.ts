@@ -87,6 +87,8 @@ export interface WindowRow {
   caption: string
   /** Short noun/verb phrases the captioner flagged as the most specific visible details. */
   caption_evidence?: string[]
+  /** Non-speech sounds heard in this window (siren, horn, ...) with exact seconds. */
+  sound_events?: { label: string; start: number; end: number; confidence: number }[]
   provenance: 'direct' | 'inherited' | 'unavailable'
   confidence: number
   has_audio: boolean
@@ -103,7 +105,14 @@ export interface ChatCitation {
   end: number
   label: string
   snippet: string
-  kind: 'transcript' | 'visual'
+  kind: 'transcript' | 'visual' | 'audio'
+}
+
+/** What the model saw in an attached reference photo. */
+export interface ChatReference {
+  subject: string
+  description: string
+  distinguishing_marks: string[]
 }
 
 export interface ChatMessage {
@@ -111,6 +120,11 @@ export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
   created_at?: number
+  /** Server path of the reference photo on a user turn (relative to the API base). */
+  image_url?: string
+  /** Browser-only preview while the message is still being answered. */
+  image_preview?: string
+  reference?: ChatReference | null
   citations?: ChatCitation[]
   found_in_video?: boolean
   /** "video" when the transcript couldn't answer and the model watched the footage. */
@@ -148,6 +162,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const jobUrls = {
   thumbnail: (id: string) => `${API_BASE_URL}/api/processing/jobs/${id}/thumbnail`,
   video: (id: string) => `${API_BASE_URL}/api/processing/jobs/${id}/video`,
+  /** A small frame at a whole second — the cited moment itself. */
+  frame: (id: string, seconds: number, download = false) =>
+    `${API_BASE_URL}/api/processing/jobs/${id}/frame/${Math.max(0, Math.floor(seconds))}${download ? '?download=1' : ''}`,
+  /** A downloadable MP4 cut of start–end (re-encoded, exact to the second). */
+  clip: (id: string, start: number, end: number) =>
+    `${API_BASE_URL}/api/processing/jobs/${id}/clip?start=${Math.max(0, start)}&end=${end}`,
 }
 
 export function listJobs(): Promise<JobSummary[]> {
@@ -178,12 +198,35 @@ export function getChat(id: string): Promise<ChatMessage[]> {
   return request<{ messages: ChatMessage[] }>(`/api/processing/jobs/${id}/chat`).then((b) => b.messages)
 }
 
-export function askVideo(id: string, question: string): Promise<ChatMessage> {
-  return request<{ message: ChatMessage }>(`/api/processing/jobs/${id}/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question }),
-  }).then((b) => b.message)
+/**
+ * Ask one question; an optional reference photo ("find this bottle / car /
+ * person") is described by the model first, then matched against the footage.
+ */
+export function askVideo(id: string, question: string, image?: File | null): Promise<ChatMessage> {
+  const body = new FormData()
+  body.append('question', question)
+  if (image) body.append('image', image, image.name || 'reference.jpg')
+  return request<{ message: ChatMessage }>(`/api/processing/jobs/${id}/chat/ask`, { method: 'POST', body })
+    .then((b) => b.message)
+    .catch((cause) => {
+      // A 404 here is the route, not the job: the API process predates this feature.
+      if (cause instanceof JobsApiError && cause.status === 404) {
+        throw new JobsApiError('The backend is running an older build without photo chat. Restart the backend server and try again.', 404)
+      }
+      throw cause
+    })
+}
+
+export function chatImageUrl(path: string): string {
+  return path.startsWith('http') || path.startsWith('blob:') ? path : `${API_BASE_URL}${path}`
+}
+
+/**
+ * Upload the video to the chat model ahead of the first question. Best effort:
+ * the backend answers immediately and uploads in the background.
+ */
+export function warmChat(id: string): Promise<void> {
+  return request(`/api/processing/jobs/${id}/chat/warm`, { method: 'POST' }).then(() => undefined)
 }
 
 export function clearChat(id: string): Promise<void> {

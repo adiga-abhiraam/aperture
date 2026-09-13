@@ -66,6 +66,24 @@ class GeminiTranscriptionResult:
 
 
 @dataclass(frozen=True)
+class SoundEvent:
+    """A non-speech sound the model heard, in absolute video seconds."""
+
+    label: str
+    start: float
+    end: float
+    confidence: float
+
+
+@dataclass(frozen=True)
+class GeminiSoundEventResult:
+    events: tuple[SoundEvent, ...]
+    diagnostics: tuple[GeminiCallDiagnostics, ...]
+    model: str
+    chunk_count: int
+
+
+@dataclass(frozen=True)
 class GeminiCaptionResult:
     caption: str
     confidence: float
@@ -113,6 +131,31 @@ _TRANSCRIPTION_SCHEMA: dict[str, Any] = {
     },
     "required": ["segments"],
 }
+
+_SOUND_EVENT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "events": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string"},
+                    "start_seconds": {"type": "number"},
+                    "end_seconds": {"type": "number"},
+                    "confidence": {"type": "number"},
+                },
+                "required": ["label", "start_seconds", "end_seconds", "confidence"],
+            },
+        }
+    },
+    "required": ["events"],
+}
+
+# Labels the model sometimes returns for "nothing notable"; never indexed.
+_NON_EVENT_LABELS = {"speech", "talking", "conversation", "silence", "none", "no sound", "background noise", "ambient noise", "quiet"}
+MAX_SOUND_EVENTS_PER_CHUNK = 40
+
 
 _CAPTION_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -208,6 +251,113 @@ class GeminiFlashLiteTranscriber:
             model=self.model,
             chunk_count=len(chunks),
         )
+
+
+def _sound_events_prompt(duration_seconds: float) -> str:
+    return (
+        f"This audio clip is {duration_seconds:g} seconds long and starts at 0. Listen for "
+        "distinct NON-SPEECH sound events that a security or archive operator would want "
+        "to find later: sirens, alarms, car or bike horns, engine revving or screeching "
+        "tyres, crashes or impacts, glass breaking, gunshots or bangs, explosions, screams "
+        "or shouting, crying, dog barking, doors slamming, knocking, footsteps running, "
+        "music starting or stopping, applause, laughter, phone ringing, whistles, bells. "
+        "For each event give a short lower-case label (e.g. 'police siren', 'car horn', "
+        "'glass breaking'), its start and end in seconds within THIS clip, and a confidence "
+        "from 0 to 1. Report each event once with its actual duration; do not list ordinary "
+        "speech, silence, or continuous background hum. Return an empty list when nothing "
+        "notable is heard. Return only the requested JSON."
+    )
+
+
+def _parse_sound_events(payload: Mapping[str, Any], chunk: GeminiMediaClip) -> list[SoundEvent]:
+    raw_events = payload.get("events")
+    if not isinstance(raw_events, list):
+        raise GeminiStructuredOutputError("sound event response must contain an events list")
+    parsed: list[SoundEvent] = []
+    for item in raw_events[:MAX_SOUND_EVENTS_PER_CHUNK]:
+        if not isinstance(item, Mapping):
+            continue
+        label = " ".join(str(item.get("label") or "").lower().split())[:60]
+        if not label or label in _NON_EVENT_LABELS:
+            continue
+        try:
+            start = _finite_number(item.get("start_seconds"), "start_seconds")
+            end = _finite_number(item.get("end_seconds"), "end_seconds")
+        except GeminiStructuredOutputError:
+            continue
+        if end <= start:
+            end = start + _DEGENERATE_SEGMENT_SECONDS
+        try:
+            confidence = _number_in_range(item.get("confidence", 0.5), "confidence", 0.0, 1.0)
+        except GeminiStructuredOutputError:
+            confidence = 0.5
+        absolute_start = max(chunk.start_seconds, min(chunk.end_seconds, chunk.start_seconds + start))
+        absolute_end = max(chunk.start_seconds, min(chunk.end_seconds, chunk.start_seconds + end))
+        if absolute_end <= absolute_start:
+            continue
+        parsed.append(SoundEvent(label=label, start=absolute_start, end=absolute_end, confidence=confidence))
+    return parsed
+
+
+class GeminiFlashLiteSoundEventDetector:
+    """Label non-speech sound events in the transcription audio chunks.
+
+    Runs on the same chunks the transcriber already cut, so a 24-minute video
+    costs twelve extra calls, and every event carries the exact second it
+    starts so the chat can cite "police siren at [03:12]".
+    """
+
+    def __init__(self, runtime: GeminiJsonRuntime, *, model: str = GEMINI_FLASH_LITE_MODEL) -> None:
+        if not model.strip():
+            raise ValueError("Gemini sound-event model must not be empty")
+        self.runtime = runtime
+        self.model = model
+
+    def detect_chunks(
+        self,
+        chunks: Sequence[GeminiMediaClip],
+        *,
+        progress_callback: Callable[[int, int], None] | None = None,
+        concurrency: int = 1,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> GeminiSoundEventResult:
+        def detect_one(chunk: GeminiMediaClip) -> tuple[dict[str, Any], GeminiCallDiagnostics] | None:
+            if should_cancel is not None and should_cancel():
+                return None
+            return self.runtime.generate_json(
+                model=self.model,
+                prompt=_sound_events_prompt(chunk.duration_seconds),
+                media_path=chunk.path,
+                media_mime_type=chunk.mime_type,
+                response_schema=_SOUND_EVENT_SCHEMA,
+                operation_name="sound_events",
+            )
+
+        events: list[SoundEvent] = []
+        diagnostics: list[GeminiCallDiagnostics] = []
+        with ThreadPoolExecutor(max_workers=max(1, int(concurrency))) as pool:
+            futures = [(chunk, pool.submit(detect_one, chunk)) for chunk in chunks]
+            for index, (chunk, future) in enumerate(futures):
+                outcome = future.result()
+                if outcome is None:
+                    continue
+                payload, call = outcome
+                diagnostics.append(call)
+                events.extend(_parse_sound_events(payload, chunk))
+                if progress_callback is not None:
+                    progress_callback(index + 1, len(chunks))
+        return GeminiSoundEventResult(
+            events=tuple(sorted(events, key=lambda item: (item.start, item.end))),
+            diagnostics=tuple(diagnostics),
+            model=self.model,
+            chunk_count=len(chunks),
+        )
+
+
+def sound_events_for_window(events: Sequence[SoundEvent], start: float, end: float) -> list[SoundEvent]:
+    """Events overlapping [start, end), in time order."""
+
+    return [event for event in events if event.start < end and event.end > start]
 
 
 class GeminiFlashLiteCaptioner:
@@ -325,6 +475,10 @@ def _decomposition_prompt(query: str) -> str:
     )
 
 
+# Nominal length given to a segment whose end is not after its start.
+_DEGENERATE_SEGMENT_SECONDS = 0.5
+
+
 def _parse_transcript_segments(
     payload: Mapping[str, Any], chunk: GeminiMediaClip
 ) -> list[TranscriptSegment]:
@@ -339,7 +493,11 @@ def _parse_transcript_segments(
         end = _finite_number(item.get("end_seconds"), "end_seconds")
         text = _required_text(item, "text")
         if end <= start:
-            raise GeminiStructuredOutputError("transcript segment end must be after start")
+            # Long, fast, overlapping speech makes the model emit the odd
+            # zero-length or reversed segment.  The words are still real, so
+            # keep them with a short nominal duration instead of failing the
+            # whole video for one bad timestamp.
+            end = start + _DEGENERATE_SEGMENT_SECONDS
         absolute_start = max(chunk.start_seconds, min(chunk.end_seconds, chunk.start_seconds + start))
         absolute_end = max(chunk.start_seconds, min(chunk.end_seconds, chunk.start_seconds + end))
         if absolute_end <= absolute_start:

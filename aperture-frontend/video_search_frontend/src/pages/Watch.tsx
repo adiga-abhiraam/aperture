@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, ArrowLeft, ChevronDown, Cpu, Loader2, RefreshCw, Square, Zap } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, ChevronDown, Cpu, Download, Eye, FileDown, Image as ImageIcon, Loader2, Play, RefreshCw, Square, Zap } from 'lucide-react'
 import { PageShell } from '../components/PageShell'
 import { VideoChat } from '../components/VideoChat'
 import { navigate } from '../lib/router'
@@ -21,6 +21,9 @@ import {
   type WindowRow,
 } from '../lib/jobs'
 import { formatBytes } from '../lib/format'
+import { formatElapsed, useLiveElapsed } from '../lib/useLiveElapsed'
+import { clipRange, countFindings, findingsFromMessages, findingsToCsv, type FindingGroup } from '../lib/findings'
+import { chatImageUrl, type ChatMessage } from '../lib/jobs'
 
 const STAGE_ORDER = ['transcription', 'embedding_windows', 'captioning_windows', 'building_payloads', 'qdrant_upsert']
 
@@ -76,6 +79,7 @@ function WindowCard({ row, isCurrent, onSeek }: { row: WindowRow; isCurrent: boo
             <span>· {(row.end - row.start).toFixed(0)}s</span>
             <span>· caption {row.provenance}</span>
             {row.has_audio ? <span>· audio</span> : <span>· silent</span>}
+            {(row.sound_events?.length ?? 0) > 0 && <span className="text-glow-soft">· {row.sound_events!.length} sound{row.sound_events!.length === 1 ? '' : 's'}</span>}
             {row.indexed === false && <span className="text-amber-200/70">· not indexed</span>}
             {failed && <span className="text-red-300/80">· error</span>}
           </span>
@@ -94,6 +98,7 @@ function WindowCard({ row, isCurrent, onSeek }: { row: WindowRow; isCurrent: boo
             </div>
           )}
           <Chips label="visible details" values={evidence} />
+          <Chips label="sounds heard" values={(row.sound_events ?? []).map((sound) => `${sound.label} · ${formatClock(sound.start)}`)} />
           {vectors.length > 0 && (
             <div>
               <p className="font-mono text-[10px] uppercase tracking-wider text-paper-300/40">vectors</p>
@@ -121,16 +126,113 @@ function WindowCard({ row, isCurrent, onSeek }: { row: WindowRow; isCurrent: boo
   )
 }
 
+function downloadText(name: string, text: string, type = 'text/csv') {
+  const url = URL.createObjectURL(new Blob([text], { type }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = name
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+/** One question's cited moments: jump, cut a clip, or save the frame. */
+function ResultGroup({
+  group,
+  jobId,
+  duration,
+  current,
+  onSeek,
+}: {
+  group: FindingGroup
+  jobId: string
+  duration: number
+  current: number
+  onSeek: (seconds: number) => void
+}) {
+  return (
+    <section className="rounded-xl border border-white/10 bg-ink-800/40">
+      <header className="flex items-start gap-3 border-b border-white/10 px-3 py-2.5">
+        {group.imageUrl && <img src={chatImageUrl(group.imageUrl)} alt="" className="h-10 w-10 shrink-0 rounded-md border border-white/10 object-cover" />}
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-xs text-paper-100">{group.question || 'Question'}</p>
+          <p className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[10px] uppercase tracking-wider text-paper-300/45">
+            {group.lookingFor && (
+              <span className="inline-flex items-center gap-1 text-glow-soft">
+                <ImageIcon size={10} /> {group.lookingFor}
+              </span>
+            )}
+            <span className="inline-flex items-center gap-1">
+              <Eye size={10} /> {group.source === 'video' ? 'watched the footage' : 'transcript & scene notes'}
+            </span>
+            <span>{group.findings.length} moment{group.findings.length === 1 ? '' : 's'}</span>
+          </p>
+        </div>
+      </header>
+      <ul className="divide-y divide-white/5">
+        {group.findings.map((finding) => {
+          const range = clipRange(finding, duration)
+          const isCurrent = current >= finding.start && current < Math.max(finding.end, finding.start + 2)
+          return (
+            <li key={finding.id} className={`flex items-start gap-3 px-3 py-2.5 ${isCurrent ? 'bg-glow/10' : ''}`}>
+              <button type="button" onClick={() => onSeek(finding.start)} className="relative shrink-0 overflow-hidden rounded-md border border-white/10 bg-black" title="Play from here">
+                <img src={jobUrls.frame(jobId, finding.start)} alt="" loading="lazy" className="h-12 w-[4.5rem] object-cover" />
+                <span className="absolute inset-0 flex items-center justify-center bg-black/30 opacity-0 transition-opacity hover:opacity-100">
+                  <Play size={14} fill="currentColor" className="text-white" />
+                </span>
+              </button>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-start gap-2">
+                  <button type="button" onClick={() => onSeek(finding.start)} className="shrink-0 rounded-md bg-glow/15 px-1.5 py-px font-mono text-[11px] text-glow-soft hover:bg-glow/25">
+                    {finding.label}
+                  </button>
+                  <p className="line-clamp-2 min-w-0 flex-1 text-xs leading-snug text-paper-100/80" title={finding.snippet}>
+                    {finding.snippet || 'Cited moment'}
+                  </p>
+                </div>
+                <div className="mt-1.5 flex items-center gap-1">
+                  <span className="mr-auto text-[10px] uppercase tracking-wider text-paper-300/40">
+                    {finding.kind === 'audio' ? 'heard' : finding.kind === 'transcript' ? 'speech' : 'on screen'}
+                  </span>
+                  <a
+                    href={jobUrls.clip(jobId, range.start, range.end)}
+                    className="inline-flex items-center gap-1 rounded-full border border-white/15 px-2 py-1 text-[10px] text-paper-300/80 transition-colors hover:border-glow/50 hover:text-white"
+                    title={`Download ${formatClock(range.start)}–${formatClock(range.end)} as MP4`}
+                  >
+                    <Download size={11} /> Clip
+                  </a>
+                  <a
+                    href={jobUrls.frame(jobId, finding.start, true)}
+                    className="inline-flex items-center gap-1 rounded-full border border-white/15 px-2 py-1 text-[10px] text-paper-300/80 transition-colors hover:border-glow/50 hover:text-white"
+                    title="Download this frame as JPEG"
+                  >
+                    <ImageIcon size={11} /> Frame
+                  </a>
+                </div>
+              </div>
+            </li>
+          )
+        })}
+      </ul>
+    </section>
+  )
+}
+
 export function Watch({ jobId }: { jobId: string }) {
   const [job, setJob] = useState<JobDetail | null>(null)
   const [windows, setWindows] = useState<WindowRow[]>([])
   const [error, setError] = useState<string | null>(null)
   const [tab, setTab] = useState<'transcript' | 'moments' | 'windows' | 'details'>('transcript')
+  const [sideTab, setSideTab] = useState<'chat' | 'results'>('chat')
+  const [chatMessages, setChatMessages] = useState<ChatMessage[] | null>(null)
+  const onChatMessages = useCallback((messages: ChatMessage[]) => setChatMessages(messages), [])
   const [current, setCurrent] = useState(0)
   const [busy, setBusy] = useState(false)
   const player = useRef<HTMLVideoElement>(null)
   const status = job ? uiStatus(job.status) : null
   const active = status === 'processing' || status === 'queued'
+  const liveElapsed = useLiveElapsed(job?.elapsed_seconds, active)
 
   const load = useCallback(async () => {
     try {
@@ -167,6 +269,32 @@ export function Watch({ jobId }: { jobId: string }) {
 
   const transcript = useMemo(() => transcriptFromWindows(windows), [windows])
   const moments = useMemo(() => momentsFromWindows(windows), [windows])
+  const results = useMemo(() => findingsFromMessages(chatMessages ?? []), [chatMessages])
+  const resultCount = countFindings(results)
+
+  // A fresh answer with cited moments pulls the Results tab forward, so the
+  // eye lands on the evidence right after the question is answered.  The
+  // history that loads with the page does not count as fresh.
+  const lastResultId = results[0]?.id
+  const seenResultId = useRef<string | undefined>(undefined)
+  const chatPrimed = useRef(false)
+  // "New" dot on the Results tab until it is opened.
+  const [freshResults, setFreshResults] = useState(false)
+  useEffect(() => {
+    if (chatMessages === null) return
+    if (!chatPrimed.current) {
+      chatPrimed.current = true
+      seenResultId.current = lastResultId
+      return
+    }
+    if (lastResultId && lastResultId !== seenResultId.current) {
+      seenResultId.current = lastResultId
+      setFreshResults(true)
+    }
+  }, [chatMessages, lastResultId])
+  useEffect(() => {
+    if (sideTab === 'results') setFreshResults(false)
+  }, [sideTab, resultCount])
   const activeTranscript = transcript.findIndex((row) => current >= row.start && current < row.end)
 
   const run = async (action: () => Promise<unknown>) => {
@@ -266,7 +394,7 @@ export function Watch({ jobId }: { jobId: string }) {
                       <Loader2 size={12} className="animate-spin" /> {stageLabel(job.stage)}
                     </span>
                     <span className="font-mono text-paper-300/70">
-                      {percent}% · {formatSeconds(job.elapsed_seconds)}
+                      {percent}% · {formatElapsed(liveElapsed)}
                     </span>
                   </div>
                   <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10">
@@ -402,9 +530,64 @@ export function Watch({ jobId }: { jobId: string }) {
               )}
             </div>
 
-            {/* Chat column */}
-            <aside className="lg:sticky lg:top-4 lg:h-[calc(100vh-2rem)] lg:self-start">
-              <VideoChat jobId={job.job_id} ready={status === 'ready'} onSeek={seek} />
+            {/* Chat column: the conversation and, one tab over, every moment it cited */}
+            <aside className="flex flex-col lg:sticky lg:top-4 lg:h-[calc(100vh-2rem)] lg:self-start">
+              <div className="mb-2 flex gap-1 rounded-full border border-white/10 bg-ink-900/70 p-1 text-xs">
+                {(
+                  [
+                    ['chat', 'Ask this video', 0],
+                    ['results', 'Results', resultCount],
+                  ] as const
+                ).map(([value, label, count]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => setSideTab(value)}
+                    className={`relative flex-1 rounded-full px-3 py-1.5 transition-colors ${
+                      sideTab === value ? 'bg-glow text-black' : 'text-paper-300/70 hover:text-white'
+                    }`}
+                  >
+                    {label}
+                    {count > 0 && <span className="ml-1.5 font-mono text-[10px] opacity-80">{count}</span>}
+                    {value === 'results' && freshResults && sideTab !== 'results' && (
+                      <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-glow" aria-label="New results" />
+                    )}
+                  </button>
+                ))}
+              </div>
+              {/* Both stay mounted so switching tabs never loses a half-typed question.
+                  Toggled with the `hidden` class (not the attribute): Tailwind's `flex`
+                  utility would otherwise override the attribute and show both at once. */}
+              <div className={sideTab === 'chat' ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
+                <VideoChat jobId={job.job_id} ready={status === 'ready'} onSeek={seek} onMessages={onChatMessages} />
+              </div>
+              <section className={sideTab === 'results' ? 'liquid-glass flex min-h-0 flex-1 flex-col rounded-2xl border border-white/10 bg-ink-900/70' : 'hidden'}>
+                <header className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+                  <p className="text-xs text-paper-300/60">
+                    {resultCount ? `${resultCount} cited moment${resultCount === 1 ? '' : 's'} · ${results.length} question${results.length === 1 ? '' : 's'}` : 'Cited moments'}
+                  </p>
+                  {resultCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => downloadText(`${displayTitle(job).replace(/[^\w-]+/g, '_')}_results.csv`, findingsToCsv(displayTitle(job), results))}
+                      className="inline-flex items-center gap-1.5 rounded-full border border-white/15 px-3 py-1 text-[11px] text-paper-300/80 transition-colors hover:border-glow/50 hover:text-white"
+                    >
+                      <FileDown size={12} /> Export CSV
+                    </button>
+                  )}
+                </header>
+                <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3">
+                  {results.length === 0 ? (
+                    <p className="rounded-xl border border-white/10 bg-ink-800/50 px-3 py-3 text-xs leading-relaxed text-paper-300/60">
+                      Ask a question — every moment the answer cites is collected here with a clip and a frame you can download.
+                    </p>
+                  ) : (
+                    results.map((group) => (
+                      <ResultGroup key={group.id} group={group} jobId={job.job_id} duration={m.duration ?? 0} current={current} onSeek={seek} />
+                    ))
+                  )}
+                </div>
+              </section>
             </aside>
           </div>
         )}

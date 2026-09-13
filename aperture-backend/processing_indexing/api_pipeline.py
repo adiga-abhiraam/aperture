@@ -38,6 +38,7 @@ from .gemini_runtime import (
     GeminiCallDiagnostics,
     GeminiInputError,
     GeminiJsonRuntime,
+    GeminiKeyPool,
     GoogleGenAIRuntime,
     redact_mapping,
     redact_text,
@@ -47,6 +48,9 @@ from .gemini_transcription import (
     GeminiCaptionResult,
     GeminiFlashLiteCaptioner,
     GeminiFlashLiteQueryDecomposer,
+    GeminiFlashLiteSoundEventDetector,
+    SoundEvent,
+    sound_events_for_window,
     GeminiFlashLiteTranscriber,
     GeminiMediaClip,
     GeminiQueryPlan,
@@ -709,11 +713,14 @@ class ApiGeminiProcessingPipeline:
         progress_callback: Callable[[ApiPipelineEvent], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
         should_cancel: Callable[[], bool] | None = None,
+        sound_detector: GeminiFlashLiteSoundEventDetector | None = None,
     ) -> None:
         self.media_preparer = media_preparer
         self.embeddings = embeddings
         self.transcriber = transcriber
         self.captioner = captioner
+        # Optional: labels sirens/horns/etc. on the transcription chunks.
+        self.sound_detector = sound_detector
         self.record_sink = record_sink
         self.settings = settings or ApiPipelineSettings()
         self.progress_callback = progress_callback
@@ -774,11 +781,15 @@ class ApiGeminiProcessingPipeline:
         stage_seconds: dict[str, float] = {}
         try:
             stage_started = self.clock()
+            sound_events: list[SoundEvent] = []
             transcript_result = self._transcribe(
                 session,
                 duration_seconds=duration_seconds,
                 has_audio=has_audio,
                 total_windows=len(windows),
+                sound_events_out=sound_events,
+                diagnostics_out=diagnostics,
+                errors=errors,
             )
             diagnostics.extend(transcript_result.diagnostics)
             stage_seconds["transcription"] = self.clock() - stage_started
@@ -815,6 +826,7 @@ class ApiGeminiProcessingPipeline:
                 selected=selected,
                 source_path=path,
                 errors=errors,
+                sound_events=sound_events,
             )
             stage_seconds["building_payloads"] = self.clock() - stage_started
             self._check_cancelled()
@@ -903,6 +915,9 @@ class ApiGeminiProcessingPipeline:
         duration_seconds: float,
         has_audio: bool,
         total_windows: int,
+        sound_events_out: list[SoundEvent] | None = None,
+        diagnostics_out: list[GeminiCallDiagnostics] | None = None,
+        errors: dict[str, str] | None = None,
     ) -> GeminiTranscriptionResult:
         if not has_audio:
             self._emit(
@@ -936,7 +951,7 @@ class ApiGeminiProcessingPipeline:
             )
 
         try:
-            return self.transcriber.transcribe_chunks(
+            result = self.transcriber.transcribe_chunks(
                 chunks,
                 progress_callback=progress,
                 concurrency=self.settings.transcription_concurrency,
@@ -944,7 +959,48 @@ class ApiGeminiProcessingPipeline:
             )
         except TypeError:
             # Custom transcribers in tests may implement the older signature.
-            return self.transcriber.transcribe_chunks(chunks, progress_callback=progress)
+            result = self.transcriber.transcribe_chunks(chunks, progress_callback=progress)
+
+        # Sound events ride on the same chunks (they are cut with ``-n`` and
+        # cannot be prepared twice).  A failure here only loses the labels.
+        if self.sound_detector is not None and sound_events_out is not None and not self._cancelled():
+            self._emit(
+                "transcription",
+                "running",
+                0.28,
+                f"Listening for sound events in {len(chunks)} audio chunks",
+                total_windows=total_windows,
+            )
+            try:
+                sounds = self.sound_detector.detect_chunks(
+                    chunks,
+                    concurrency=self.settings.transcription_concurrency,
+                    should_cancel=self._cancelled,
+                )
+            except Exception as exc:  # noqa: BLE001 - labels are optional
+                if errors is not None:
+                    errors["sound_events"] = redact_text(exc)
+                self._emit(
+                    "transcription",
+                    "warning",
+                    0.28,
+                    "Sound event detection failed; speech and visual retrieval remain available",
+                    total_windows=total_windows,
+                    details={"error": redact_text(exc)},
+                )
+            else:
+                sound_events_out.extend(sounds.events)
+                if diagnostics_out is not None:
+                    diagnostics_out.extend(sounds.diagnostics)
+                self._emit(
+                    "transcription",
+                    "running",
+                    0.28,
+                    f"Heard {len(sounds.events)} sound events",
+                    total_windows=total_windows,
+                    details={"sound_events": len(sounds.events)},
+                )
+        return result
 
     def _embed_windows(
         self,
@@ -1111,6 +1167,7 @@ class ApiGeminiProcessingPipeline:
         selected: set[int],
         source_path: Path,
         errors: dict[str, str],
+        sound_events: Sequence[SoundEvent] = (),
     ) -> tuple[list[ApiWindowRecord], int, int]:
         records: list[ApiWindowRecord] = []
         direct = 0
@@ -1190,6 +1247,7 @@ class ApiGeminiProcessingPipeline:
                     except Exception as exc:  # noqa: BLE001 - retain other modalities
                         errors[f"{item.window.window_id}:caption_embedding"] = redact_text(exc)
 
+            window_sounds = sound_events_for_window(sound_events, item.window.start, item.window.end)
             payload: dict[str, Any] = {
                 "video_id": item.window.video_id,
                 "window_id": item.window.window_id,
@@ -1199,6 +1257,17 @@ class ApiGeminiProcessingPipeline:
                 "transcript": item.transcript,
                 "caption": caption,
                 "caption_evidence": evidence,
+                # Non-speech sounds heard in this window, with the exact
+                # second each starts so the chat can cite the trigger moment.
+                "sound_events": [
+                    {
+                        "label": sound.label,
+                        "start": round(sound.start, 2),
+                        "end": round(sound.end, 2),
+                        "confidence": round(sound.confidence, 3),
+                    }
+                    for sound in window_sounds
+                ],
                 "has_audio": item.audio is not None,
                 "caption_direct": caption_direct,
                 "caption_inherited": caption_inherited,
@@ -1254,6 +1323,9 @@ class GeminiApiPipelineFactoryConfig:
     """Explicit in-memory setup; intentionally does not read environment variables."""
 
     gemini_api_key: str = field(repr=False)
+    # Extra keys rotated round-robin with ``gemini_api_key`` so several
+    # free-tier quotas are spent in parallel.  Empty keeps the single key.
+    gemini_api_keys: tuple[str, ...] = field(default=(), repr=False)
     embedding_model: str = DEFAULT_GEMINI_EMBEDDING_PROFILE.model
     embedding_dimensions: int = DEFAULT_GEMINI_EMBEDDING_PROFILE.dimensions
     generation_model: str = GEMINI_FLASH_LITE_MODEL
@@ -1296,9 +1368,17 @@ def build_gemini_api_pipeline(
     resolved_settings = settings or ApiPipelineSettings(profile=profile)
     if resolved_settings.profile != profile:
         raise ValueError("provided API pipeline settings must use the factory profile")
-    resolved_runtime = runtime or GoogleGenAIRuntime(api_key=config.gemini_api_key)
-    transport = embedding_transport or GoogleGenAIEmbeddingClient(
-        api_key=config.gemini_api_key
+    pool_keys = tuple(dict.fromkeys((config.gemini_api_key, *config.gemini_api_keys)))
+    key_pool = GeminiKeyPool(pool_keys) if len(pool_keys) > 1 else None
+    resolved_runtime = runtime or (
+        GoogleGenAIRuntime(key_pool=key_pool)
+        if key_pool is not None
+        else GoogleGenAIRuntime(api_key=config.gemini_api_key)
+    )
+    transport = embedding_transport or (
+        GoogleGenAIEmbeddingClient(key_pool=key_pool)
+        if key_pool is not None
+        else GoogleGenAIEmbeddingClient(api_key=config.gemini_api_key)
     )
     embeddings = GeminiEmbedding2Adapter(
         transport,
@@ -1311,11 +1391,13 @@ def build_gemini_api_pipeline(
         resolved_runtime, model=config.generation_model
     )
     captioner = GeminiFlashLiteCaptioner(resolved_runtime, model=config.generation_model)
+    sound_detector = GeminiFlashLiteSoundEventDetector(resolved_runtime, model=config.generation_model)
     pipeline = ApiGeminiProcessingPipeline(
         media_preparer=media_preparer or FfmpegMediaPreparer(),
         embeddings=embeddings,
         transcriber=transcriber,
         captioner=captioner,
+        sound_detector=sound_detector,
         record_sink=record_sink,
         settings=resolved_settings,
         progress_callback=progress_callback,

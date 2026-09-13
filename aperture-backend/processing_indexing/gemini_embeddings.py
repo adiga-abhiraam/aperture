@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .gemini_runtime import (
+    GeminiKeyPool,
     GeminiRetryPolicy,
     GeminiSDKUnavailableError,
     call_with_retry,
@@ -419,19 +420,27 @@ class GoogleGenAIEmbeddingClient:
         self,
         *,
         api_key: str | None = None,
+        key_pool: GeminiKeyPool | None = None,
         client: Any | None = None,
         types_module: Any | None = None,
         sdk_loader: Callable[[], tuple[Any, Any]] | None = None,
         retry_policy: GeminiRetryPolicy | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ):
+        if key_pool is not None and api_key is not None:
+            raise ValueError("Provide either api_key or key_pool, not both")
         self._api_key = api_key
+        # With a pool every call (including a retry after a 429) takes the next
+        # key, so per-minute free-tier quotas add up across keys.
+        self._key_pool = key_pool
+        self._clients_by_key: dict[str, Any] = {}
+        self._genai: Any | None = None
         self._client = client
         self._types = types_module
         self._sdk_loader = sdk_loader or _load_google_sdk
         self.retry_policy = retry_policy or GeminiRetryPolicy()
         self._sleep = sleep
-        # Windows are embedded from several threads; build the client once.
+        # Windows are embedded from several threads; build each client once.
         self._client_lock = threading.Lock()
 
     def embed(
@@ -472,6 +481,16 @@ class GoogleGenAIEmbeddingClient:
         return _extract_embedding_values(response)
 
     def _ensure_client_and_types(self) -> tuple[Any, Any]:
+        if self._key_pool is not None and self._client is None:
+            key = self._key_pool.next_key("embed")
+            with self._client_lock:
+                if self._types is None:
+                    self._genai, self._types = self._sdk_loader()
+                client = self._clients_by_key.get(key)
+                if client is None:
+                    client = self._genai.Client(api_key=key)
+                    self._clients_by_key[key] = client
+            return client, self._types
         if self._client is None or self._types is None:
             with self._client_lock:
                 if self._client is None or self._types is None:

@@ -12,8 +12,10 @@ only transient/quota failures are retried.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -198,22 +200,79 @@ class GeminiRetryPolicy:
         )
 
 
-class GeminiKeyPool:
-    """Thread-safe round-robin selector that never exposes its key values."""
+# Requests per minute a single free-tier key is allowed to send per model
+# family.  Set below Google's published free limit so bursts never trip it;
+# override with GEMINI_PER_KEY_RPM (0 disables pacing).
+DEFAULT_PER_KEY_RPM = 12
 
-    def __init__(self, keys: Sequence[str]) -> None:
+
+class GeminiKeyPool:
+    """Thread-safe key selector that paces each key under its own quota.
+
+    Keys are handed out round-robin, but a key that has already sent its
+    per-minute allowance is skipped, and when every key is at its limit the
+    caller sleeps until the earliest slot frees up.  Waiting a second up
+    front is far cheaper than a 429 followed by 2-20 s of retry back-off,
+    and the retry storm that used to make neighbouring keys trip too.
+
+    ``bucket`` separates quotas that Google tracks separately (generation
+    versus embedding models) so one does not throttle the other.  Key values
+    are never exposed in ``repr`` or errors.
+    """
+
+    def __init__(
+        self,
+        keys: Sequence[str],
+        *,
+        per_key_rpm: int | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         normalized = tuple(dict.fromkeys(key.strip() for key in keys if key.strip()))
         if not normalized:
             raise GeminiAuthenticationError("At least one Gemini API key is required")
         self._keys = normalized
         self._index = 0
         self._lock = Lock()
+        if per_key_rpm is None:
+            try:
+                per_key_rpm = int(os.environ.get("GEMINI_PER_KEY_RPM", "") or DEFAULT_PER_KEY_RPM)
+            except ValueError:
+                per_key_rpm = DEFAULT_PER_KEY_RPM
+        self._per_key_rpm = max(0, per_key_rpm)
+        self._clock = clock
+        self._sleep = sleep
+        # (bucket, key) -> send times within the last minute.
+        self._sent: dict[tuple[str, str], deque[float]] = {}
 
-    def next_key(self) -> str:
-        with self._lock:
-            key = self._keys[self._index]
-            self._index = (self._index + 1) % len(self._keys)
-            return key
+    def _window(self, bucket: str, key: str, now: float) -> deque[float]:
+        sent = self._sent.setdefault((bucket, key), deque())
+        while sent and now - sent[0] >= 60.0:
+            sent.popleft()
+        return sent
+
+    def next_key(self, bucket: str = "generate") -> str:
+        """Return a key that may send now, sleeping until one can if needed."""
+
+        while True:
+            with self._lock:
+                if self._per_key_rpm == 0:
+                    key = self._keys[self._index]
+                    self._index = (self._index + 1) % len(self._keys)
+                    return key
+                now = self._clock()
+                earliest = float("inf")
+                for offset in range(len(self._keys)):
+                    position = (self._index + offset) % len(self._keys)
+                    key = self._keys[position]
+                    sent = self._window(bucket, key, now)
+                    if len(sent) < self._per_key_rpm:
+                        sent.append(now)
+                        self._index = (position + 1) % len(self._keys)
+                        return key
+                    earliest = min(earliest, sent[0] + 60.0)
+                wait = max(0.05, earliest - now)
+            self._sleep(wait)
 
     @property
     def size(self) -> int:
@@ -351,6 +410,7 @@ class GoogleGenAIRuntime:
         sdk_loader: Callable[[], tuple[Any, Any]] | None = None,
         retry_policy: GeminiRetryPolicy | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        reuse_uploads: bool = False,
     ) -> None:
         if key_pool is not None and api_key is not None:
             raise ValueError("Provide either api_key or key_pool, not both")
@@ -366,6 +426,68 @@ class GoogleGenAIRuntime:
         self._sdk_loader = sdk_loader or _load_google_sdk
         self.retry_policy = retry_policy or GeminiRetryPolicy()
         self._sleep = sleep
+        # Uploading a video and waiting for Gemini to mark it ACTIVE costs
+        # 20-30 s; the answer itself takes ~4 s.  With ``reuse_uploads`` a
+        # large file is uploaded once per client and referenced again by
+        # later requests (Gemini keeps files for 48 h), so a chat about one
+        # video pays the upload only once.  Uploaded files are keyed by the
+        # client that owns them because files are scoped to an API key.
+        self._reuse_uploads = reuse_uploads
+        self._upload_cache: dict[tuple[int, str, int, int], Any] = {}
+        self._upload_locks: dict[tuple[int, str, int, int], Lock] = {}
+        self._upload_cache_guard = Lock()
+
+    # Files below this size are sent inline; above it, with reuse enabled,
+    # they go through the Files API so later requests can reference them.
+    REUSABLE_MEDIA_MIN_BYTES = 1024 * 1024
+
+    def warm_media(self, path: Path, mime_type: str) -> bool:
+        """Upload ``path`` now so the first request that needs it is fast.
+
+        Returns True when a reusable upload is ready, False when the runtime
+        does not reuse uploads or the file is small enough to be sent inline.
+        """
+
+        if not self._reuse_uploads:
+            return False
+        if path.stat().st_size < self.REUSABLE_MEDIA_MIN_BYTES:
+            return False
+        client, types = self._ensure_client_and_types()
+        self._cached_upload(client, types, path, mime_type)
+        return True
+
+    def _upload_cache_key(self, client: Any, path: Path) -> tuple[int, str, int, int]:
+        stat = path.stat()
+        return (id(client), str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+
+    def _cached_upload(self, client: Any, types: Any, path: Path, mime_type: str) -> Any:
+        """Return an ACTIVE upload for ``path``, uploading once per client."""
+
+        key = self._upload_cache_key(client, path)
+        with self._upload_cache_guard:
+            lock = self._upload_locks.setdefault(key, Lock())
+        # One upload per file at a time: a question asked while the page is
+        # still warming waits for that upload instead of starting a second.
+        with lock:
+            cached = self._upload_cache.get(key)
+            if cached is not None and self._upload_still_active(client, cached):
+                return cached
+            upload = self._upload_file(client, types, path, mime_type)
+            self._upload_cache[key] = upload
+            return upload
+
+    @staticmethod
+    def _upload_still_active(client: Any, upload: Any) -> bool:
+        name = getattr(upload, "name", None)
+        get_file = getattr(getattr(client, "files", None), "get", None)
+        if not name or get_file is None:
+            return True
+        try:
+            current = get_file(name=name)
+        except Exception:  # noqa: BLE001 - expired or deleted server-side
+            return False
+        state = _upload_state(current)
+        return state is None or state == "ACTIVE"
 
     def generate_json(
         self,
@@ -426,6 +548,10 @@ class GoogleGenAIRuntime:
             contents: Any = prompt
             parts: list[Any] = []
             for path, mime_type in media:
+                # A reusable upload is referenced, never re-sent or deleted.
+                if self._reuse_uploads and path.stat().st_size >= self.REUSABLE_MEDIA_MIN_BYTES:
+                    parts.append(self._cached_upload(client, types, path, mime_type))
+                    continue
                 # Small clips (window videos, audio chunks) go inline: one
                 # request instead of upload + wait-for-ACTIVE + delete, which
                 # dominated per-window caption latency.  Large files still
@@ -465,7 +591,7 @@ class GoogleGenAIRuntime:
                 self._genai = genai
             self._client = genai.Client(api_key=self._api_key)
             return self._client, self._types
-        key = self._key_pool.next_key()
+        key = self._key_pool.next_key("generate")
         with self._client_lock:
             client = self._clients_by_key.get(key)
             if client is None:

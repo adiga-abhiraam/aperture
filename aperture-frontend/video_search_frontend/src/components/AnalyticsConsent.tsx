@@ -32,9 +32,14 @@ export function AnalyticsConsent({ pathname }: { pathname: string }) {
     )
   }
 
+  // The watch page keeps its chat box bottom-right; a centred banner sat on
+  // top of the chat's input row and swallowed clicks, so it hugs the left there.
+  const onWatchPage = pathname.startsWith('/videos/')
   return (
     <aside
-      className="fixed inset-x-3 bottom-3 z-50 mx-auto max-w-2xl rounded-2xl border border-white/15 bg-[#0b0b0b]/95 p-4 text-white backdrop-blur-xl sm:p-5"
+      className={`fixed inset-x-3 bottom-3 z-50 max-w-2xl rounded-2xl border border-white/15 bg-[#0b0b0b]/95 p-4 text-white backdrop-blur-xl sm:p-5 ${
+        onWatchPage ? 'lg:mr-auto lg:max-w-xl' : 'mx-auto'
+      }`}
       aria-label="Analytics preference"
     >
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
