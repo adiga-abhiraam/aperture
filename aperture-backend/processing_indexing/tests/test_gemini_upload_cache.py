@@ -134,3 +134,26 @@ def test_reuse_off_keeps_upload_and_delete_per_request(tmp_path: Path) -> None:
     runtime.generate_json(model="m", prompt="q", media_path=video, media_mime_type="video/mp4")
     assert log.count("upload:clip.mp4") == 2
     assert log.count("delete:files/1") == 1 and log.count("delete:files/2") == 1
+
+
+def test_every_request_starts_with_a_unique_tag_with_and_without_media(tmp_path: Path) -> None:
+    """Gemini bounces repeated prompt prefixes with a generic 429; each request
+    must open with a fresh tag, also when media follows the prompt."""
+    seen: list[str] = []
+
+    class _RecordingModels(_Models):
+        def generate_content(self, *, model, contents, config):
+            text = contents if isinstance(contents, str) else contents[0]
+            seen.append(text)
+            return _Response()
+
+    client = _Client([])
+    client.models = _RecordingModels([])
+    runtime = GoogleGenAIRuntime(client=client, types_module=_Types)
+    photo = tmp_path / "ref.jpg"
+    photo.write_bytes(b"\xff" * 100)
+    runtime.generate_json(model="m", prompt="Describe the clip.", media_path=photo, media_mime_type="image/jpeg")
+    runtime.generate_json(model="m", prompt="Describe the clip.", media_path=photo, media_mime_type="image/jpeg")
+    runtime.generate_json(model="m", prompt="Describe the clip.")
+    assert all(text.startswith("Request ") and text.endswith("\nDescribe the clip.") for text in seen)
+    assert len({text.split("\n")[0] for text in seen}) == 3

@@ -65,8 +65,9 @@ def test_factory_builds_pool_when_extra_keys_given() -> None:
     )
     runtime = bundle.pipeline.transcriber.runtime
     assert runtime._key_pool is not None and runtime._key_pool.size == 3
+    # A single key is still paced through a one-key pool.
     single = build_gemini_api_pipeline(GeminiApiPipelineFactoryConfig(gemini_api_key="k1"))
-    assert single.pipeline.transcriber.runtime._key_pool is None
+    assert single.pipeline.transcriber.runtime._key_pool.size == 1
 
 
 def test_env_pool_only_widens_backend_owned_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -88,7 +89,7 @@ def test_pool_paces_each_key_and_waits_when_all_are_spent() -> None:
         slept.append(seconds)
         now[0] += seconds
 
-    pool = GeminiKeyPool(["a", "b"], per_key_rpm=2, clock=lambda: now[0], sleep=sleep)
+    pool = GeminiKeyPool(["a", "b"], per_key_rpm=2, per_key_embed_rpm=2, clock=lambda: now[0], sleep=sleep)
     # 2 keys x 2 rpm = 4 sends without waiting, round-robin.
     assert [pool.next_key() for _ in range(4)] == ["a", "b", "a", "b"]
     assert slept == []
@@ -104,3 +105,9 @@ def test_pool_paces_each_key_and_waits_when_all_are_spent() -> None:
 def test_pool_pacing_can_be_disabled() -> None:
     pool = GeminiKeyPool(["a", "b"], per_key_rpm=0)
     assert [pool.next_key() for _ in range(5)] == ["a", "b", "a", "b", "a"]
+
+
+def test_embed_bucket_has_its_own_higher_budget() -> None:
+    pool = GeminiKeyPool(["a"], per_key_rpm=1, per_key_embed_rpm=3, clock=lambda: 0.0, sleep=lambda s: (_ for _ in ()).throw(AssertionError("should not wait")))
+    assert pool.next_key("generate") == "a"
+    assert [pool.next_key("embed") for _ in range(3)] == ["a", "a", "a"]

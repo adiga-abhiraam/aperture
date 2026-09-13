@@ -950,6 +950,27 @@ class ApiGeminiProcessingPipeline:
                 details={"audio_chunks_complete": current, "audio_chunks_total": total},
             )
 
+        # Sound events ride on the same chunks (they are cut with ``-n`` and
+        # cannot be prepared twice) and do not depend on the transcript, so
+        # they are detected while the chunks are being transcribed.  A failure
+        # there only loses the labels.
+        sound_future = None
+        sound_pool = None
+        if self.sound_detector is not None and sound_events_out is not None and not self._cancelled():
+            self._emit(
+                "transcription",
+                "running",
+                0.12,
+                f"Listening for sound events in {len(chunks)} audio chunks",
+                total_windows=total_windows,
+            )
+            sound_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sound-events")
+            sound_future = sound_pool.submit(
+                self.sound_detector.detect_chunks,
+                chunks,
+                concurrency=self.settings.transcription_concurrency,
+                should_cancel=self._cancelled,
+            )
         try:
             result = self.transcriber.transcribe_chunks(
                 chunks,
@@ -961,22 +982,9 @@ class ApiGeminiProcessingPipeline:
             # Custom transcribers in tests may implement the older signature.
             result = self.transcriber.transcribe_chunks(chunks, progress_callback=progress)
 
-        # Sound events ride on the same chunks (they are cut with ``-n`` and
-        # cannot be prepared twice).  A failure here only loses the labels.
-        if self.sound_detector is not None and sound_events_out is not None and not self._cancelled():
-            self._emit(
-                "transcription",
-                "running",
-                0.28,
-                f"Listening for sound events in {len(chunks)} audio chunks",
-                total_windows=total_windows,
-            )
+        if sound_future is not None and sound_pool is not None:
             try:
-                sounds = self.sound_detector.detect_chunks(
-                    chunks,
-                    concurrency=self.settings.transcription_concurrency,
-                    should_cancel=self._cancelled,
-                )
+                sounds = sound_future.result()
             except Exception as exc:  # noqa: BLE001 - labels are optional
                 if errors is not None:
                     errors["sound_events"] = redact_text(exc)
@@ -1000,6 +1008,8 @@ class ApiGeminiProcessingPipeline:
                     total_windows=total_windows,
                     details={"sound_events": len(sounds.events)},
                 )
+            finally:
+                sound_pool.shutdown(wait=False)
         return result
 
     def _embed_windows(
@@ -1368,18 +1378,12 @@ def build_gemini_api_pipeline(
     resolved_settings = settings or ApiPipelineSettings(profile=profile)
     if resolved_settings.profile != profile:
         raise ValueError("provided API pipeline settings must use the factory profile")
+    # Always go through the pool, even with one key: it paces requests under
+    # the free-tier limits instead of burning 2-20 s in 429 back-off.
     pool_keys = tuple(dict.fromkeys((config.gemini_api_key, *config.gemini_api_keys)))
-    key_pool = GeminiKeyPool(pool_keys) if len(pool_keys) > 1 else None
-    resolved_runtime = runtime or (
-        GoogleGenAIRuntime(key_pool=key_pool)
-        if key_pool is not None
-        else GoogleGenAIRuntime(api_key=config.gemini_api_key)
-    )
-    transport = embedding_transport or (
-        GoogleGenAIEmbeddingClient(key_pool=key_pool)
-        if key_pool is not None
-        else GoogleGenAIEmbeddingClient(api_key=config.gemini_api_key)
-    )
+    key_pool = GeminiKeyPool(pool_keys)
+    resolved_runtime = runtime or GoogleGenAIRuntime(key_pool=key_pool)
+    transport = embedding_transport or GoogleGenAIEmbeddingClient(key_pool=key_pool)
     embeddings = GeminiEmbedding2Adapter(
         transport,
         profile=GeminiEmbeddingProfile(

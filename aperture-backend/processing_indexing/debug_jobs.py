@@ -930,8 +930,10 @@ class JobManager:
                 window_seconds=settings.window_seconds,
                 stride_seconds=settings.stride_seconds,
                 profile=contract,
-                embed_concurrency=_env_int("API_EMBED_CONCURRENCY", 6),
-                caption_concurrency=_env_int("API_CAPTION_CONCURRENCY", 6),
+                # The key pool paces every call under the free-tier limits, so
+                # more in flight just queues at the pacer instead of tripping 429s.
+                embed_concurrency=_env_int("API_EMBED_CONCURRENCY", 12),
+                caption_concurrency=_env_int("API_CAPTION_CONCURRENCY", 8),
                 transcription_concurrency=_env_int("API_TRANSCRIPTION_CONCURRENCY", 3),
                 caption_all_windows=os.environ.get("API_CAPTION_ALL_WINDOWS", "1").lower()
                 not in ("0", "false", "no"),

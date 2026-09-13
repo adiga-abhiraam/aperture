@@ -44,3 +44,18 @@ def test_non_numeric_timestamps_are_still_rejected(tmp_path: Path) -> None:
     payload = {"segments": [{"start_seconds": "1", "end_seconds": 2, "text": "x"}]}
     with pytest.raises(GeminiStructuredOutputError):
         _parse_transcript_segments(payload, _chunk(tmp_path))
+
+
+def test_prompts_keep_context_and_closing_fixed_but_vary_instruction_order() -> None:
+    from processing_indexing.gemini_transcription import _caption_prompt
+    from processing_indexing.models import VideoWindow
+
+    window = VideoWindow(video_id="v", window_id="v_window_0003", index=3, start=30, end=40)
+    prompts = {_caption_prompt(window) for _ in range(40)}
+    # Same content every time...
+    for prompt in prompts:
+        assert prompt.startswith("You are given one short clip cut from a longer video. The clip is 10 seconds long")
+        assert prompt.endswith("Return only the requested JSON.")
+        assert "Do NOT mention any timestamps." in prompt and "In `evidence`" in prompt
+    # ...but in more than one arrangement, so a job's prompts are not near-identical.
+    assert len(prompts) > 1

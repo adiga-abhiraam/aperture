@@ -69,15 +69,17 @@ Jobs are reloaded from disk when the API starts. A job that was mid-run during a
 The Cloud-API pipeline runs hosted calls concurrently and reports per-stage timings (shown under *Details* on the watch page). Tune in `.env`:
 
 ```
-API_EMBED_CONCURRENCY=6          # windows embedded at once (each window's 3 modality calls also run together)
-API_CAPTION_CONCURRENCY=6
+API_EMBED_CONCURRENCY=12         # windows embedded at once (each window's 3 modality calls also run together)
+API_CAPTION_CONCURRENCY=8
 API_TRANSCRIPTION_CONCURRENCY=3
 API_CAPTION_ALL_WINDOWS=1        # 0 = caption only scene changes (fewer calls, thinner chat context)
 API_CLIP_MAX_HEIGHT=360          # clips are downscaled before upload; 0 = keep source size
 API_CLIP_FPS=6
 ```
 
-Clips and audio chunks under 12 MB are sent inline with the request rather than through the Files API (no upload → wait → delete round trip). Reference: the 3-minute demo clip processes in about 90 s with all 19 windows captioned.
+Clips and audio chunks under 12 MB are sent inline with the request rather than through the Files API (no upload → wait → delete round trip). Reference: a 7.5-minute clip (46 windows, all captioned, sound events on) processes in about 55 s with the 14-key pool below; with a single free key the caption stage is quota-bound at ~12 windows per minute, so budget ~1 minute of processing per minute of video.
+
+Two things the pipeline does to stay clear of Gemini's free-tier limiter, since they are easy to undo by accident: every request starts with a unique `Request <id>.` line, and the caption/transcription/sound prompts put their independent instructions in a random order. Gemini fingerprints prompt text and bounces near-identical requests with a generic 429 (no quota id) once too many arrive per minute — a job sends hundreds from one template, and before this every second caption was silently retried after a 2–20 s sleep.
 
 Rate-limit (429) responses are retried with backoff up to ~50 s total. To avoid hitting them at all, add several free keys to `GEMINI_API_KEYS_JSON` (JSON array): jobs rotate through the pool and **pace each key** at `GEMINI_PER_KEY_RPM` requests per minute (default 12, below the free-tier limit; `0` disables pacing). 14 keys process a 24-minute video in about 5 minutes with no dropped captions.
 

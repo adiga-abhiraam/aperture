@@ -9,6 +9,7 @@ environment variables or creates a Google client itself.
 from __future__ import annotations
 
 import math
+import random
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -254,18 +255,22 @@ class GeminiFlashLiteTranscriber:
 
 
 def _sound_events_prompt(duration_seconds: float) -> str:
-    return (
+    return _compose(
         f"This audio clip is {duration_seconds:g} seconds long and starts at 0. Listen for "
         "distinct NON-SPEECH sound events that a security or archive operator would want "
         "to find later: sirens, alarms, car or bike horns, engine revving or screeching "
         "tyres, crashes or impacts, glass breaking, gunshots or bangs, explosions, screams "
         "or shouting, crying, dog barking, doors slamming, knocking, footsteps running, "
-        "music starting or stopping, applause, laughter, phone ringing, whistles, bells. "
-        "For each event give a short lower-case label (e.g. 'police siren', 'car horn', "
-        "'glass breaking'), its start and end in seconds within THIS clip, and a confidence "
-        "from 0 to 1. Report each event once with its actual duration; do not list ordinary "
-        "speech, silence, or continuous background hum. Return an empty list when nothing "
-        "notable is heard. Return only the requested JSON."
+        "music starting or stopping, applause, laughter, phone ringing, whistles, bells.",
+        [
+            "For each event give a short lower-case label (e.g. 'police siren', 'car horn', "
+            "'glass breaking'), its start and end in seconds within THIS clip, and a confidence "
+            "from 0 to 1.",
+            "Report each event once with its actual duration.",
+            "Do not list ordinary speech, silence, or continuous background hum.",
+            "Return an empty list when nothing notable is heard.",
+        ],
+        "Return only the requested JSON.",
     )
 
 
@@ -440,27 +445,49 @@ class GeminiFlashLiteQueryDecomposer:
         )
 
 
+def _compose(context: str, instructions: Sequence[str], closing: str) -> str:
+    """Context first, independent instructions in a random order, closing last.
+
+    Gemini's free tier fingerprints prompt text and bounces near-duplicates
+    with a generic 429 once too many similar requests arrive per minute; a
+    job sends hundreds of prompts built from one template, so varying the
+    order of instructions that do not depend on each other keeps them apart
+    without changing what is asked.
+    """
+
+    body = list(instructions)
+    random.shuffle(body)
+    return " ".join([context, *body, closing])
+
+
 def _transcription_prompt(duration_seconds: float) -> str:
-    return (
-        "Transcribe only the audible speech in this audio clip. Return JSON matching "
-        "the supplied schema. Timestamp each segment in seconds relative to the start "
-        f"of this {duration_seconds:g}-second clip. Do not invent speech. If there is "
-        "no intelligible speech, return an empty segments array."
+    return _compose(
+        f"Transcribe only the audible speech in this {duration_seconds:g}-second audio clip.",
+        [
+            "Timestamp each segment in seconds relative to the start of this clip.",
+            "Do not invent speech.",
+            "If there is no intelligible speech, return an empty segments array.",
+        ],
+        "Return JSON matching the supplied schema.",
     )
 
 
 def _caption_prompt(window: VideoWindow) -> str:
     length = max(0.0, window.end - window.start)
-    return (
+    return _compose(
         "You are given one short clip cut from a longer video. The clip is "
         f"{length:g} seconds long and starts at 0; in the full video it covers "
-        f"{window.start:g}s-{window.end:g}s, but do NOT mention any timestamps. "
-        "Describe everything visible in the clip in 2-4 plain sentences: the setting, "
-        "people or animals (appearance, clothing, what they do), objects, on-screen text, "
-        "camera moves, and how the scene changes from the start of the clip to its end. "
-        "In `evidence`, list 3-8 short noun/verb phrases for the most specific visible "
-        "details (e.g. 'white piglet on a towel', 'hand scratching belly'). Do not infer "
-        "sound, intent, identity, or anything outside the clip. Return only the requested JSON."
+        f"{window.start:g}s-{window.end:g}s.",
+        [
+            "Do NOT mention any timestamps.",
+            "Describe everything visible in the clip in 2-4 plain sentences: the setting, "
+            "people or animals (appearance, clothing, what they do), objects, on-screen text, "
+            "camera moves, and how the scene changes from the start of the clip to its end.",
+            "In `evidence`, list 3-8 short noun/verb phrases for the most specific visible "
+            "details (e.g. 'white piglet on a towel', 'hand scratching belly').",
+            "Do not infer sound, intent, identity, or anything outside the clip.",
+        ],
+        "Return only the requested JSON.",
     )
 
 

@@ -15,6 +15,7 @@ import json
 import os
 import re
 import time
+import uuid
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -200,10 +201,13 @@ class GeminiRetryPolicy:
         )
 
 
-# Requests per minute a single free-tier key is allowed to send per model
-# family.  Set below Google's published free limit so bursts never trip it;
-# override with GEMINI_PER_KEY_RPM (0 disables pacing).
+# Requests per minute a single free-tier key may send, per quota bucket.
+# Google's free limits are 15/min for generation models and 100/min for
+# gemini-embedding; these sit below them so bursts never trip a 429.
+# Override with GEMINI_PER_KEY_RPM (generation) and GEMINI_PER_KEY_EMBED_RPM
+# (embeddings); 0 disables pacing for that bucket.
 DEFAULT_PER_KEY_RPM = 12
+DEFAULT_PER_KEY_EMBED_RPM = 80
 
 
 class GeminiKeyPool:
@@ -225,6 +229,7 @@ class GeminiKeyPool:
         keys: Sequence[str],
         *,
         per_key_rpm: int | None = None,
+        per_key_embed_rpm: int | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -235,11 +240,10 @@ class GeminiKeyPool:
         self._index = 0
         self._lock = Lock()
         if per_key_rpm is None:
-            try:
-                per_key_rpm = int(os.environ.get("GEMINI_PER_KEY_RPM", "") or DEFAULT_PER_KEY_RPM)
-            except ValueError:
-                per_key_rpm = DEFAULT_PER_KEY_RPM
-        self._per_key_rpm = max(0, per_key_rpm)
+            per_key_rpm = _env_int("GEMINI_PER_KEY_RPM", DEFAULT_PER_KEY_RPM)
+        if per_key_embed_rpm is None:
+            per_key_embed_rpm = _env_int("GEMINI_PER_KEY_EMBED_RPM", DEFAULT_PER_KEY_EMBED_RPM)
+        self._rpm_by_bucket = {"generate": max(0, per_key_rpm), "embed": max(0, per_key_embed_rpm)}
         self._clock = clock
         self._sleep = sleep
         # (bucket, key) -> send times within the last minute.
@@ -254,9 +258,10 @@ class GeminiKeyPool:
     def next_key(self, bucket: str = "generate") -> str:
         """Return a key that may send now, sleeping until one can if needed."""
 
+        limit = self._rpm_by_bucket.get(bucket, self._rpm_by_bucket["generate"])
         while True:
             with self._lock:
-                if self._per_key_rpm == 0:
+                if limit == 0:
                     key = self._keys[self._index]
                     self._index = (self._index + 1) % len(self._keys)
                     return key
@@ -266,7 +271,7 @@ class GeminiKeyPool:
                     position = (self._index + offset) % len(self._keys)
                     key = self._keys[position]
                     sent = self._window(bucket, key, now)
-                    if len(sent) < self._per_key_rpm:
+                    if len(sent) < limit:
                         sent.append(now)
                         self._index = (position + 1) % len(self._keys)
                         return key
@@ -545,7 +550,13 @@ class GoogleGenAIRuntime:
         client, types = self._ensure_client_and_types()
         uploads: list[Any] = []
         try:
-            contents: Any = prompt
+            # Gemini's free tier bounces requests whose opening tokens repeat
+            # (a duplicate-request limiter) with a generic 429 that carries no
+            # quota id.  Every caption/transcription prompt in a job starts
+            # with the same sentence, so a unique first line keeps them apart;
+            # it is regenerated on each retry so a bounced call never repeats.
+            tagged_prompt = "\n".join((_request_tag(), prompt))
+            contents: Any = tagged_prompt
             parts: list[Any] = []
             for path, mime_type in media:
                 # A reusable upload is referenced, never re-sent or deleted.
@@ -564,7 +575,7 @@ class GoogleGenAIRuntime:
                 uploads.append(upload)
                 parts.append(upload)
             if parts:
-                contents = [prompt, *parts]
+                contents = [tagged_prompt, *parts]
             config = _generate_config(types, response_schema=response_schema)
             response = client.models.generate_content(
                 model=model,
@@ -689,6 +700,19 @@ def _upload_state(upload: Any) -> str | None:
         return None
     # The SDK returns an enum; older/raw responses return a plain string.
     return str(getattr(state, "name", None) or state).upper()
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
+def _request_tag() -> str:
+    """One short, unique first line for a prompt; models ignore it."""
+
+    return f"Request {uuid.uuid4().hex[:12]}."
 
 
 def _load_google_sdk() -> tuple[Any, Any]:
